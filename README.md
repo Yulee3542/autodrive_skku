@@ -12,6 +12,7 @@ cd autodrive_for_skku
 ./setup.sh                     # apt + venv + 패키지 + 시리얼 권한 자동 설정
 source .venv/bin/activate
 python tools/check_env.py      # 카메라/시리얼/패키지 점검
+python tools/run_tests.py      # 모듈별 on/off 테스트 러너 (--list로 목록 확인)
 python main.py                 # 미션 메뉴가 뜬다
 ```
 
@@ -68,7 +69,8 @@ python main.py --mission road --show
 │   ├── nodes/                 # 센서/액추에이터 스레드 (arduino, camera, lidar)
 │   ├── missions/              # 미션 로직 (road / traffic / t_parking, lane_follow 공유)
 │   └── vendor/                # SKKU 제공 Function_Library (수정 금지)
-└── tools/                     # check_env.py(환경 점검), smoke_test_lane_follow.py
+└── tools/                     # check_env.py(환경 점검), smoke_test_lane_follow.py,
+│                               # run_tests.py(모듈별 on/off 테스트 러너)
 ```
 
 초기 실차 검증 스크립트(`main3_c920_record.py`, `run_test_fixed.ino`)는 위 미션/펌웨어 코드로
