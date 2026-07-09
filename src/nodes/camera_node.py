@@ -8,19 +8,31 @@ except ImportError:
 
 WSL2_HINT = "WSL2라면 Windows에서 usbipd attach 필요 (README 'WSL2에서 실행' 절 참고)"
 
+_ROTATE_MAP = {}
+if cv2 is not None:
+    _ROTATE_MAP = {
+        "CW": cv2.ROTATE_90_CLOCKWISE,
+        "CCW": cv2.ROTATE_90_COUNTERCLOCKWISE,
+        "180": cv2.ROTATE_180,
+    }
+
 
 class CameraNode:
     """전방 C920(+선택 후방) 카메라를 백그라운드 스레드로 계속 읽는다.
 
     split=True(기본)면 전방 프레임을 상/하 절반으로 나눠 latest()가
     (top=신호등용, bottom=차선용)을 반환한다. 후방 카메라는 rear()로 접근.
+
+    rotate: 전방 카메라가 portrait(세로)로 물리 마운트된 경우의 회전 보정.
+    None|"CW"|"CCW"|"180" — 후방 카메라에는 적용하지 않는다.
     """
 
     def __init__(self, front_index, rear_index=None, split=True,
-                 width=640, height=480):
+                 width=640, height=480, rotate=None):
         self._split = split
         self._width = width
         self._height = height
+        self._rotate = _ROTATE_MAP.get(rotate)
         self._lock = threading.Lock()
         self._front_frame = None
         self._rear_frame = None
@@ -53,6 +65,8 @@ class CameraNode:
             if self._front is not None:
                 ok, frame = self._front.read()
                 if ok:
+                    if self._rotate is not None:
+                        frame = cv2.rotate(frame, self._rotate)
                     with self._lock:
                         self._front_frame = frame
             if self._rear is not None:

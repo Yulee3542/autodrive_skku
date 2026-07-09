@@ -73,7 +73,8 @@ def main():
     car = ArduinoNode(arduino_port, config.ARDUINO_BAUD)
     cameras = CameraNode(args.front_camera, args.rear_camera,
                          split=config.CAMERA_SPLIT and not args.no_split,
-                         width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT)
+                         width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT,
+                         rotate=config.FRONT_CAMERA_ROTATE)
     lidar = LidarNode(lidar_port, config.LIDAR_BAUD)
 
     period = 1.0 / config.LOOP_HZ

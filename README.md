@@ -50,8 +50,12 @@ python main.py --mission road --show
 - 전방 **C920 한 대**의 프레임을 상/하로 분할해 사용한다 (검증된 방식):
   - `sensors["top"]` = 상단 절반 → 신호등 인식
   - `sensors["bottom"]` = 하단 절반 → 차선 인식
-- 후방 카메라는 `config.py`의 `REAR_CAMERA` 또는 `--rear-camera`로 지정하면 `sensors["rear"]`로 들어온다 (T주차용).
-- 차선 인식은 팀이 검증한 `src/vendor/Function_Library.py`의 `edge_detection`을 그대로 사용하며, 파라미터는 `config.LANE_EDGE`에 있다.
+- 전방 카메라는 **portrait(세로) 마운트**가 기준이다 — 수직 화각이 넓어져(≈78°) 가까운 차선과
+  먼 신호등을 한 프레임에 담기 유리하다. C920은 하드웨어 회전이 없으므로 `config.FRONT_CAMERA_ROTATE`
+  (`"CW"`/`"CCW"`/`"180"`)로 캡처 후 소프트웨어 보정한다 — 실제 마운트 방향과 안 맞으면(좌우 반전 등)
+  이 값부터 확인.
+- 후방 카메라는 `config.py`의 `REAR_CAMERA` 또는 `--rear-camera`로 지정하면 `sensors["rear"]`로 들어온다 (T주차용, 회전 보정 없음).
+- 차선 인식은 팀이 검증한 `src/vendor/Function_Library.py`의 `edge_detection`을 그대로 사용하며, 파라미터는 `config.LANE_EDGE`에 있다. `road`/`traffic` 미션은 `src/missions/lane_follow.py`의 `follow_lane()`을 공유해서 호출한다(중복 제거 + 프레임 단위 예외 격리).
 
 ## 폴더 구조
 
@@ -62,11 +66,13 @@ python main.py --mission road --show
 ├── arduino/car_controller/    # 차량 펌웨어 (.ino)
 ├── src/
 │   ├── nodes/                 # 센서/액추에이터 스레드 (arduino, camera, lidar)
-│   ├── missions/              # 미션 로직 (road / traffic / t_parking)
+│   ├── missions/              # 미션 로직 (road / traffic / t_parking, lane_follow 공유)
 │   └── vendor/                # SKKU 제공 Function_Library (수정 금지)
-├── tools/check_env.py         # 환경 점검
-└── what we've been doing so far/  # 실차 검증 완료된 참고 코드 (main3, run_test_fixed)
+└── tools/                     # check_env.py(환경 점검), smoke_test_lane_follow.py
 ```
+
+초기 실차 검증 스크립트(`main3_c920_record.py`, `run_test_fixed.ino`)는 위 미션/펌웨어 코드로
+전부 포팅 완료되어 저장소에서 제거됐다.
 
 ## 펌웨어 (아두이노 메가)
 
