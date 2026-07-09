@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# autodrive_for_skku 환경 자동 설정 (Ubuntu / WSL2)
+# autodrive_skku 환경 자동 설정 (Ubuntu / WSL2)
 # 사용법: ./setup.sh
 set -e
 cd "$(dirname "$0")"

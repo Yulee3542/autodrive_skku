@@ -1,4 +1,4 @@
-# autodrive_for_skku
+# autodrive_skku
 
 국민 AI 자율주행 경진대회 차량 코드. 아두이노 메가(구동 모터 + 스티어링 모터) + 전방 C920 카메라(상/하 분할) + RPLidar(+선택 후방 카메라) 구성이며, `main.py` 한 번 실행으로 모든 센서 노드가 뜨고 미션을 선택해 주행한다.
 
@@ -7,8 +7,8 @@
 ## 빠른 시작 (Ubuntu / WSL2)
 
 ```bash
-git clone https://github.com/Yulee3542/autodrive_for_skku.git
-cd autodrive_for_skku
+git clone https://github.com/Yulee3542/autodrive_skku.git
+cd autodrive_skku
 ./setup.sh                     # apt + venv + 패키지 + 시리얼 권한 자동 설정
 source .venv/bin/activate
 python tools/check_env.py      # 카메라/시리얼/패키지 점검

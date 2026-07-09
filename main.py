@@ -47,7 +47,7 @@ def show_frames(top, bottom, rear):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="autodrive_for_skku 미션 런처")
+    parser = argparse.ArgumentParser(description="autodrive_skku 미션 런처")
     parser.add_argument("--mission", choices=list(MISSIONS), help="생략하면 메뉴에서 선택")
     parser.add_argument("--arduino", default=config.ARDUINO_PORT, help="아두이노 시리얼 포트")
     parser.add_argument("--lidar", default=config.LIDAR_PORT, help="라이다 시리얼 포트")

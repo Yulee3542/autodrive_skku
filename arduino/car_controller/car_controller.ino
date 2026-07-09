@@ -1,4 +1,4 @@
-// autodrive_for_skku 차량 펌웨어 (실차 검증본 run_test_fixed.ino 기반)
+// autodrive_skku 차량 펌웨어 (실차 검증본 run_test_fixed.ino 기반)
 //
 // 시리얼 프로토콜 (9600bps) — README '시리얼 프로토콜' 절과 동일하게 유지할 것
 //   PC -> Arduino:
