@@ -19,12 +19,12 @@ python3 tools/run_tests.py                  # 모듈별 on/off 테스트 러너 
 ros2 launch autodrive_skku_ros bringup.launch.py mission:=road show:=true
 ```
 
-**`mission:=` 인자는 필수다** — ROS 2 launch 시스템이 자식 프로세스의 stdin을 연결하지
-않는 알려진 제약([ros2/launch#735](https://github.com/ros2/launch/issues/735)) 때문에,
-`ros2 launch`로 띄운 `mission_node`는 기존처럼 메뉴에서 고르는 대화형 선택을 할 수 없다
-(인자를 생략하면 에러 메시지를 내고 바로 종료). 메뉴가 꼭 필요하면 다른 노드는 그대로
-launch로 띄운 채 `mission_node`만 별도 터미널에서 직접 실행할 것 (이 경우는 stdin이
-정상 동작한다):
+**`mission:=` 인자는 (기본값인 `run_mission:=true`일 때) 필수다** — ROS 2 launch
+시스템이 자식 프로세스의 stdin을 연결하지 않는 알려진 제약
+([ros2/launch#735](https://github.com/ros2/launch/issues/735)) 때문에, `ros2 launch`로
+띄운 `mission_node`는 기존처럼 메뉴에서 고르는 대화형 선택을 할 수 없다(생략하면
+에러 메시지를 내고 바로 종료). 메뉴가 꼭 필요하면 다른 노드는 그대로 launch로 띄운 채
+`mission_node`만 별도 터미널에서 직접 실행할 것 (이 경우는 stdin이 정상 동작한다):
 
 ```bash
 ros2 run autodrive_skku_ros mission_node
@@ -32,13 +32,32 @@ ros2 run autodrive_skku_ros mission_node
 
 | launch 인자 | 설명 |
 |------|------|
-| `mission:={road,traffic,t_parking}` (필수) | `ros2 launch`에서는 생략 불가 (위 제약 참고) |
+| `mission:={road,traffic,t_parking}` (`run_mission:=true`면 필수) | `ros2 launch`에서는 대화형 메뉴 대신 이걸로 지정 (위 제약 참고) |
+| `run_mission:=false` | `mission_node` 없이 센서/액추에이터 노드만 기동 — 아래 "수동 모터 테스트" 참고 |
 | `arduino_port:=/dev/ttyACM0` | 아두이노 포트 (기본: 자동 감지) |
 | `lidar_port:=/dev/ttyUSB0` | 라이다 포트 (기본: 자동 감지) |
 | `front_camera:=0` | 전방 카메라 인덱스 |
 | `rear_camera:=2` | 후방 카메라 인덱스 (T주차용, `-1`이면 미사용) |
 | `show:=true` | 카메라 창 표시 (`q`로 종료, 디스플레이 있는 환경 한정) |
 | `foxglove_port:=8765` | Foxglove WebSocket 포트 |
+
+### 수동 모터 테스트 (미션 없이)
+
+자율주행 미션이 차를 조작하지 않는 상태에서 모터/조향을 직접 확인하고 싶으면
+(기존 `tools/hw_test.py`와 같은 목적) `run_mission:=false`로 띄우고 토픽에 직접
+명령을 발행한다:
+
+```bash
+ros2 launch autodrive_skku_ros bringup.launch.py run_mission:=false
+
+# 별도 터미널에서:
+ros2 topic pub /car/cmd/go std_msgs/msg/Empty {} --once
+ros2 topic pub /car/cmd/drive autodrive_msgs/msg/DriveCmd "{speed: 80}" --once
+ros2 topic pub /car/cmd/steer autodrive_msgs/msg/SteerCmd "{direction: 'L', pulse: true}" --once
+ros2 topic pub /car/cmd/stop std_msgs/msg/Empty {} --once
+```
+
+Foxglove 앱의 "Publish" 패널로도 같은 토픽에 발행할 수 있다.
 
 기본값(속도, 정지 거리, 차선 인식 파라미터 등)은 전부 `autodrive_skku_ros/autodrive_skku_ros/config.py`에 있다 — 미션 튜닝값은 ROS 파라미터화하지 않고 그대로 파이썬 모듈로 두었다(대회 전 회귀 위험 최소화).
 
