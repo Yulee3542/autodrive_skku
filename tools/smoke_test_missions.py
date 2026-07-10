@@ -9,10 +9,12 @@
 사용법: python tools/smoke_test_missions.py
 (cv2/numpy 필요 — pip install opencv-python-headless numpy)
 """
+import math
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "autodrive_skku_ros"))
 
 try:
     import cv2
@@ -22,12 +24,13 @@ except ImportError as e:
     print("     pip install opencv-python-headless numpy 로 설치 후 재실행")
     sys.exit(1)
 
-import config
-from src.missions.road import RoadMission, detect_obstacle_ahead
-from src.missions.traffic import TrafficMission
-from src.missions.t_parking import TParkingMission
-from src.nodes.lidar_node import (vehicle_bearing_deg, filter_self,
-                                  rear_min_m, side_clearance_m)
+from autodrive_skku_ros import config
+from autodrive_skku_ros.missions.road import RoadMission, detect_obstacle_ahead
+from autodrive_skku_ros.missions.traffic import TrafficMission
+from autodrive_skku_ros.missions.t_parking import TParkingMission
+from autodrive_skku_ros.nodes.lidar_node import (vehicle_bearing_deg, filter_self,
+                                  rear_min_m, side_clearance_m,
+                                  laserscan_msg_to_tuples, scan_to_ranges)
 
 MOUNT = config.LIDAR_MOUNT
 MASK = config.LIDAR_SELF_MASK_DEG
@@ -173,6 +176,49 @@ def test_lidar_geometry():
     return ok
 
 
+# ---- 1b. ROS LaserScan ↔ 튜플 변환 (rclpy 없이 순수 함수만 검증) ----
+
+class FakeLaserScan:
+    """sensor_msgs/LaserScan을 흉내내는 최소 더미 — rclpy 설치 없이도 테스트 가능."""
+
+    def __init__(self, ranges, angle_min=-math.pi, angle_increment=None,
+                 range_min=0.05, range_max=12.0):
+        self.ranges = ranges
+        self.angle_min = angle_min
+        self.angle_increment = (2 * math.pi / len(ranges)) if angle_increment is None \
+            else angle_increment
+        self.range_min = range_min
+        self.range_max = range_max
+
+
+def test_scan_conversion():
+    print("== ROS LaserScan ↔ 튜플 변환 (laserscan_msg_to_tuples / scan_to_ranges) ==")
+    ok = True
+
+    # 4점 스캔: 0=angle_min(-180도), 이후 90도 간격. inf/range 밖은 스킵돼야 함.
+    msg = FakeLaserScan(ranges=[1.0, float("inf"), 0.5, 100.0])
+    tuples = laserscan_msg_to_tuples(msg)
+    ok &= check("inf/range_max 밖 레이는 스킵 (4개 중 2개만 남음)", len(tuples) == 2)
+    ok &= check("range_mm 변환 정확 (1.0m → 1000mm)",
+                any(abs(dist_mm - 1000.0) < 1e-6 for _q, _a, dist_mm in tuples))
+    ok &= check("angle_deg 변환 정확 (angle_min=-180도 그대로)",
+                any(abs(angle_deg - (-180.0)) < 1e-6 for _q, angle_deg, _d in tuples))
+
+    # 스캔 없음 → 전부 NaN
+    start, end, ranges_empty = scan_to_ranges([], MOUNT, MASK, n_bins=8)
+    ok &= check("빈 스캔 → 전부 NaN", all(math.isnan(r) for r in ranges_empty))
+    ok &= check("start/end_angle == -pi/+pi",
+                abs(start + math.pi) < 1e-9 and abs(end - math.pi) < 1e-9)
+
+    # 자차 반사(전방 wedge)는 제거되고, 후방 반사는 해당 bin에 남아야 함
+    start, end, ranges_m = scan_to_ranges([(15, 180, 500), (15, 0, 800)], MOUNT, MASK, n_bins=8)
+    ok &= check("전방 자차 반사는 제거되어 전방 bin이 NaN",
+                math.isnan(ranges_m[len(ranges_m) // 2]))
+    ok &= check("후방(bearing 0) 반사는 남음 (NaN 아닌 bin 존재)",
+                any(not math.isnan(r) for r in ranges_m))
+    return ok
+
+
 # ---- 2. 카메라 흰색 구분 (차선/정지선/횡단보도/장애물) ----
 
 def test_white_discrimination():
@@ -315,6 +361,7 @@ def test_t_parking():
 def main():
     results = [
         test_lidar_geometry(),
+        test_scan_conversion(),
         test_white_discrimination(),
         test_traffic_fsm(),
         test_road_lane_change(),

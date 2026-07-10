@@ -1,6 +1,11 @@
-# Ubuntu(Python 3.10+) 기준. 설치: .venv/bin/pip install -r requirements.txt
-opencv-python>=4.8
-numpy>=1.24
-pyserial>=3.5
+# ROS 2 전환 후 대부분의 의존성(opencv/numpy/pyserial/matplotlib)은 rosdep이
+# autodrive_skku_ros/package.xml을 보고 apt로 설치한다 (setup.sh/update.sh 참고).
+#
+# rplidar-roboticia만 예외 — apt/rosdep에 대응하는 패키지가 없는 PyPI 전용
+# 패키지인데, vendor/Function_Library.py(SKKU 제공, 수정 금지)가 최상단에서
+# `from rplidar import RPLidar`를 무조건 실행한다. 우리 코드는 이제 이 클래스를
+# 쓰지 않지만(라이다 통신은 공식 rplidar_ros ROS 드라이버가 담당), 그래도 임포트가
+# 성공해야 Function_Library의 다른 함수(edge_detection 등)를 쓸 수 있다.
+#
+# 설치: pip3 install --user -r requirements.txt
 rplidar-roboticia
-matplotlib>=3.7        # src/vendor/Function_Library.py 의존
