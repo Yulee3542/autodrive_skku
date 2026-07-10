@@ -44,24 +44,27 @@ ros2 run autodrive_skku_ros mission_node
 ### 수동 모터 테스트 (미션 없이)
 
 자율주행 미션이 차를 조작하지 않는 상태에서 모터/조향을 직접 확인하고 싶으면
-(기존 `tools/hw_test.py`와 같은 목적) 두 가지 방법이 있다 — 아무 방법으로 띄우든
-그 다음 `teleop_node`/`ros2 topic pub`은 동일하게 쓴다:
-
-- `run_mission:=false`: `mission_node` 자체를 아예 안 띄운다 (가장 가볍다)
-- `mission:=test`: 다른 미션과 똑같이 `mission_node`는 뜨지만 자동주행 로직이 없다
-  (미션 선택 메뉴에도 `test`가 그대로 나온다)
+(기존 `tools/hw_test.py`와 같은 목적) `mission:=test`가 가장 간단하다 — **`test`
+미션 자체가 키보드 텔레옵 조종 인터페이스를 겸한다** (별도 `teleop_node` 실행 불필요):
 
 ```bash
 ros2 launch autodrive_skku_ros bringup.launch.py run_mission:=false
-# 또는: ros2 launch autodrive_skku_ros bringup.launch.py mission:=test
 
 # 별도 터미널에서:
+ros2 run autodrive_skku_ros mission_node --ros-args -p mission:=test
+```
+`mission_node`처럼 실제 stdin이 필요해(ros2 launch는 자식 프로세스 stdin을 안
+붙여줌 — 위 제약 참고) 반드시 `ros2 run`으로 직접 실행해야 한다. Enter 없이
+키 하나로 즉시 반영된다: `g`=주행 허용, `w`/`x`=속도 +20/-20, `space`=속도 0,
+`a`/`d`=좌/우 조향 펄스, `f`=조향 중립, `s`=정지, `h`=도움말.
+
+별도 프로세스로 조종하고 싶으면 기존 `teleop_node`도 그대로 쓸 수 있다(어떤
+미션이 떠 있든 무관하게 `/car/cmd/*`에 직접 발행 — `test` 미션은 그 토픽에
+아무것도 안 보내므로 서로 안 부딪힌다):
+
+```bash
 ros2 run autodrive_skku_ros teleop_node
 ```
-`teleop_node`는 Enter 없이 키 하나로 즉시 반영된다: `g`=주행 허용,
-`w`/`x`=속도 +20/-20, `space`=속도 0, `a`/`d`=좌/우 조향 펄스, `f`=조향 중립,
-`s`=정지, `h`=도움말, `q`=종료. (`mission_node`처럼 실제 stdin이 필요해
-`ros2 launch`가 아니라 `ros2 run`으로 직접 실행해야 한다 — 위 제약 참고.)
 
 한 번씩 스크립트로 명령을 보내고 싶으면 `ros2 topic pub`도 그대로 쓸 수 있다:
 
@@ -115,7 +118,7 @@ WSL2에서 개발 중이면 Windows 쪽 Foxglove 앱은 WSL 내부 IP(`ip addr s
 | `road` 도로 주행 | ① 직진·스티어링 ② 차선 인식 주행 ③ 차선 변경 ④ 장애물 회피 차선 변경 | ①② 동작 / ③④ TODO |
 | `traffic` 신호등 주행 | ① 정지선 인식 ② 신호등 라이트 인식 | ② 동작 / ① TODO |
 | `t_parking` T 주차 | ① 라이다 맵 빌딩 ② 후방캠 주차선 인식 ③ 후진 차선 주행 ④ T주차 알고리즘 | 상태머신 골격 / ①~④ TODO |
-| `test` 수동 테스트 | 자동주행 없음(센서/토픽만 흐름) — `teleop_node`/`ros2 topic pub`과 병행 | 동작 |
+| `test` 수동 테스트 | 자동주행 없음 — 미션 자체가 키보드 텔레옵 조종(`ros2 run`으로 직접 실행 필요) | 동작 |
 
 각 미션 파일(`autodrive_skku_ros/autodrive_skku_ros/missions/*.py`) 상단 docstring에 세부 목표와 채워야 할 `TODO` 메서드가 정리돼 있다. 상태 전이·주행·조향 골격은 완성돼 있으므로 **담당 팀은 자기 미션 파일의 TODO 메서드만 채우면 된다.** 이 로직들은 ROS 2 전환 전과 100% 동일하다 — `Mission.step(sensors, car)` 인터페이스가 그대로 유지되므로.
 
