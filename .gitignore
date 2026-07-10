@@ -11,6 +11,11 @@ __pycache__/
 .venv/
 venv/
 
+# colcon (워크스페이스 루트가 아니라 이 저장소 안에서 실수로 빌드한 경우 대비)
+build/
+install/
+log/
+
 # OS
 .DS_Store
 Thumbs.db

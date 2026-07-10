@@ -52,7 +52,8 @@ def _run_env():
 
 
 def _run_lidar():
-    return _load("smoke_test_missions").test_lidar_geometry()
+    m = _load("smoke_test_missions")
+    return all([m.test_lidar_geometry(), m.test_scan_conversion()])
 
 
 def _run_camera():
@@ -78,7 +79,7 @@ def _run_parking():
 
 MODULES = {
     "env": ("환경/하드웨어 점검 (패키지·카메라·시리얼)", _run_env),
-    "lidar": ("라이다 후방 장착 지오메트리 순수 함수", _run_lidar),
+    "lidar": ("라이다 후방 장착 지오메트리 + ROS LaserScan 변환 순수 함수", _run_lidar),
     "camera": ("카메라 흰색 형태 구분 (차선/정지선/횡단보도/장애물)", _run_camera),
     "lane_follow": ("차선 추종 통합 경로 + portrait 회전 보정", _run_lane_follow),
     "traffic": ("traffic 미션 상태머신 (정지선/신호등)", _run_traffic),

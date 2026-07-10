@@ -1,9 +1,4 @@
-import threading
-
-try:
-    from rplidar import RPLidar
-except ImportError:
-    RPLidar = None
+import math
 
 # 기본 장착 파라미터 — config.LIDAR_MOUNT 미전달 시 폴백 (2026-07-09 실측과 동일)
 DEFAULT_MOUNT = dict(yaw_offset_deg=0.0, invert=False, to_rear_m=0.075)
@@ -16,6 +11,11 @@ DEFAULT_MOUNT = dict(yaw_offset_deg=0.0, invert=False, to_rear_m=0.075)
 # 차량 전방 기준 bearing(-180..180, +가 좌측)으로 변환해 다룬다:
 #   bearing = normalize(원시각도*(invert? -1:+1) + yaw_offset_deg + 180)
 # 전방 |bearing| < self_mask_deg 는 자차 차체 반사(전방이 차체에 막힘)로 제거한다.
+#
+# 하드웨어 I/O(시리얼 연결/스레드)는 ROS 2 전환 후 공식 rplidar_ros 드라이버
+# (/scan, sensor_msgs/LaserScan)가 담당한다 — 이 파일에는 순수 함수만 남고,
+# LaserScan 메시지 ↔ 이 함수들이 쓰는 [(quality, angle_deg, dist_mm), ...] 튜플
+# 표현 사이의 변환 헬퍼만 추가돼 있다(laserscan_msg_to_tuples / scan_to_ranges).
 
 def vehicle_bearing_deg(raw_angle_deg, mount):
     """라이다 원시 각도 → 차량 전방 기준 bearing (-180..180, +좌측)."""
@@ -75,63 +75,43 @@ def side_clearance_m(scan, side, mount, window_deg=(75.0, 100.0), self_mask_deg=
     return (min(dists) / 1000.0) if dists else None
 
 
-class LidarNode:
-    """RPLidar 스캔을 백그라운드 스레드로 수신해 최신 스캔을 유지한다.
+def laserscan_msg_to_tuples(msg):
+    """sensor_msgs/LaserScan → [(quality, angle_deg, dist_mm), ...].
 
-    2026-07-09: 후방 장착(0도=차량 후방) 반영 — min_distance_m()은 이제
-    "후방" 섹터의 뒤 범퍼 기준 최소 거리를 반환한다 (T주차 후진용).
-    전방은 자차 차체에 막혀 라이다로 볼 수 없다.
+    filter_self/rear_min_m/side_clearance_m이 기대하는 원본 rplidar 튜플 형태로
+    역변환한다 (quality는 이 함수들에서 쓰이지 않으므로 0으로 채운다).
+    range_min/range_max 밖이거나 inf/nan인 레이는 "반사 없음"으로 스킵한다.
     """
+    out = []
+    for i, dist_m in enumerate(msg.ranges):
+        if not math.isfinite(dist_m):
+            continue
+        if dist_m < msg.range_min or dist_m > msg.range_max:
+            continue
+        angle_deg = math.degrees(msg.angle_min + i * msg.angle_increment)
+        out.append((0, angle_deg, dist_m * 1000.0))
+    return out
 
-    def __init__(self, port, baud=115200, mount=None, self_mask_deg=75.0):
-        self.scan = None  # [(quality, angle_deg, dist_mm), ...]
-        self.mount = mount or DEFAULT_MOUNT
-        self.self_mask_deg = self_mask_deg
-        self._lidar = None
-        self._running = False
 
-        if RPLidar is None:
-            print("[lidar] rplidar 패키지 미설치 — 라이다 없이 실행")
-            return
-        if port is None:
-            print("[lidar] 포트를 찾지 못함 (--lidar 로 지정) — 라이다 없이 실행")
-            return
-        try:
-            self._lidar = RPLidar(port, baudrate=baud)
-        except Exception as e:
-            print(f"[lidar] {port} 열기 실패: {e} — 라이다 없이 실행")
-            self._lidar = None
-            return
+def scan_to_ranges(scan, mount, self_mask_deg=75.0, n_bins=360):
+    """자차 반사 제거 + 차량 기준 bearing으로 재정렬한 균등 간격 LaserScan 배열.
 
-        self._running = True
-        threading.Thread(target=self._loop, daemon=True).start()
-        print(f"[lidar] {port} 연결됨")
+    반환: (start_angle_rad, end_angle_rad, ranges_m) — ranges_m 길이는 n_bins,
+    해당 bin에 반사가 없으면 float('nan') (Foxglove/rviz는 NaN을 무반사로 처리).
+    각 bin은 -180..180도를 n_bins등분한 구간에 속하는 점 중 가장 가까운 거리를 채택한다.
+    """
+    start_angle = -math.pi
+    end_angle = math.pi
+    bin_width_deg = 360.0 / n_bins
+    ranges_m = [float("nan")] * n_bins
 
-    def _loop(self):
-        try:
-            for scan in self._lidar.iter_scans(max_buf_meas=3000):
-                if not self._running:
-                    break
-                self.scan = scan
-        except Exception as e:
-            if self._running:
-                print(f"[lidar] 수신 중단: {e}")
-            self.scan = None
+    if not scan:
+        return start_angle, end_angle, ranges_m
 
-    def min_distance_m(self, sector_deg=30):
-        """후방 ±sector_deg 내 최소 거리(m, 뒤 범퍼 기준). 스캔 없으면 None."""
-        return rear_min_m(self.scan, self.mount, sector_deg, self.self_mask_deg)
+    for bearing_deg, dist_mm in filter_self(scan, mount, self_mask_deg):
+        idx = int((bearing_deg + 180.0) / bin_width_deg) % n_bins
+        dist_m = dist_mm / 1000.0
+        if math.isnan(ranges_m[idx]) or dist_m < ranges_m[idx]:
+            ranges_m[idx] = dist_m
 
-    def side_clearance_m(self, side, window_deg=(75.0, 100.0)):
-        """좌('L')/우('R') 측면 여유 거리(m). 회피 방향 결정용."""
-        return side_clearance_m(self.scan, side, self.mount, window_deg, self.self_mask_deg)
-
-    def close(self):
-        self._running = False
-        if self._lidar is not None:
-            try:
-                self._lidar.stop()
-                self._lidar.stop_motor()
-                self._lidar.disconnect()
-            except Exception:
-                pass
+    return start_angle, end_angle, ranges_m

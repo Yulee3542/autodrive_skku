@@ -1,5 +1,5 @@
-# 차량/센서 설정 — 새 환경에서는 이 파일(또는 main.py 인자)만 바꾸면 된다.
-# 포트가 None이면 자동 감지를 시도한다. 실패 시 --arduino / --lidar 인자로 지정.
+# 차량/센서 설정 — 새 환경에서는 이 파일(또는 bringup.launch.py 인자)만 바꾸면 된다.
+# 포트가 None이면 자동 감지를 시도한다. 실패 시 arduino_port/lidar_port launch 인자로 지정.
 
 ARDUINO_PORT = None      # 예: "/dev/ttyACM0"
 ARDUINO_BAUD = 9600

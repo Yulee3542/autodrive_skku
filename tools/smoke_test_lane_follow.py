@@ -8,7 +8,8 @@
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "autodrive_skku_ros"))
 
 try:
     import cv2
@@ -18,8 +19,8 @@ except ImportError as e:
     print("     pip install opencv-python-headless numpy 로 설치 후 재실행")
     sys.exit(1)
 
-from src.missions.lane_follow import follow_lane
-from src.vendor import Function_Library as fl
+from autodrive_skku_ros.missions.lane_follow import follow_lane
+from autodrive_skku_ros.vendor import Function_Library as fl
 
 
 class FakeCar:

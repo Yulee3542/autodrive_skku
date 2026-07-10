@@ -1,5 +1,5 @@
 class Mission:
-    """모든 미션의 베이스 클래스. main.py가 매 tick step()을 호출한다.
+    """모든 미션의 베이스 클래스. mission_node(rclpy)가 매 tick step()을 호출한다.
 
     sensors dict 키:
       top / bottom   : 전방 카메라 상/하 프레임 (C920 분할, 없으면 None)

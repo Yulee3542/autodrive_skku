@@ -17,11 +17,12 @@ import os
 import sys
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "autodrive_skku_ros"))
 
-import config
-from src.nodes.arduino_node import ArduinoNode
-from src.nodes.ports import autodetect_ports
+from autodrive_skku_ros import config
+from autodrive_skku_ros.nodes.arduino_node import ArduinoNode
+from autodrive_skku_ros.nodes.ports import autodetect_ports
 
 MODULES = {
     "forward": "전진(좌우 구동 모터) 테스트",
