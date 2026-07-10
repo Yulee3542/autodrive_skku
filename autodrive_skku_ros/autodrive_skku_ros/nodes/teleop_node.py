@@ -12,14 +12,16 @@ SPEED_LIMIT = 255
 
 HELP = """
 수동 조작 모드 (모터/조향 동작 확인용) — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
-  g : go (주행 허용)
+  ※ w/x로 속도를 줘도 먼저 g(주행 허용)를 안 보내면 차가 안 움직입니다
+    (펌웨어 워치독 게이트 — s를 누르면 다시 닫히므로 그 다음엔 g부터).
+  g : go (주행 허용, 반드시 먼저)
   w : 속도 +20 (전진 방향, 음수면 후진)
   x : 속도 -20
   space : 속도 0
   a : 좌 조향 펄스 (L)
   d : 우 조향 펄스 (R)
   f : 조향 중립 (F)
-  s : stop (즉시 정지)
+  s : stop (즉시 정지, 게이트도 닫힘)
   h : 이 도움말 다시 보기
   q : 종료 (Ctrl+C도 동작)
 """
@@ -50,11 +52,13 @@ class TeleopNode(Node):
         self._drive_pub = self.create_publisher(DriveCmd, "/car/cmd/drive", 10)
         self._steer_pub = self.create_publisher(SteerCmd, "/car/cmd/steer", 10)
         self._speed = 0
+        self._went_go = False  # 펌웨어 canGo 게이트 미러 — g 전송 전엔 속도를 줘도 안 움직임
 
     def _set_speed(self, speed):
         self._speed = max(-SPEED_LIMIT, min(SPEED_LIMIT, speed))
         self._drive_pub.publish(DriveCmd(speed=self._speed))
-        print(f"speed={self._speed}")
+        note = "" if self._went_go else " (아직 g 안 보냄 — 실제로는 안 움직입니다)"
+        print(f"speed={self._speed}{note}")
 
     def run(self):
         print(HELP)
@@ -64,6 +68,7 @@ class TeleopNode(Node):
                 break
             elif key == "g":
                 self._go_pub.publish(Empty())
+                self._went_go = True
                 print("go")
             elif key == "w":
                 self._set_speed(self._speed + SPEED_STEP)
@@ -82,6 +87,7 @@ class TeleopNode(Node):
                 print("steer F")
             elif key == "s":
                 self._speed = 0
+                self._went_go = False
                 self._stop_pub.publish(Empty())
                 print("stop")
             elif key == "h":

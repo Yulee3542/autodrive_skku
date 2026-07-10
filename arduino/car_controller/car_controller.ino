@@ -12,13 +12,13 @@
 //   Arduino -> PC:
 //     0 / 1 / 2    상태 (정지/전진/후진)
 
-const int LEFT_PWM = 3;
-const int LEFT_IN1 = 24;
-const int LEFT_IN2 = 25;
+const int LEFT_PWM = 4;
+const int LEFT_IN1 = 26;
+const int LEFT_IN2 = 27;
 
-const int RIGHT_PWM = 4;
-const int RIGHT_IN1 = 26;
-const int RIGHT_IN2 = 27;
+const int RIGHT_PWM = 3;
+const int RIGHT_IN1 = 24;
+const int RIGHT_IN2 = 25;
 
 const int STEER_PWM = 2;
 const int STEER_IN1 = 22;

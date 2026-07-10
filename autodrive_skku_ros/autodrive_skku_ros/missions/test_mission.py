@@ -15,9 +15,11 @@ SPEED_LIMIT = 255
 
 HELP = """
 [test 미션] 키보드 텔레옵 — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
-  g : go (주행 허용)      w/x : 속도 +20/-20      space : 속도 0
-  a : 좌 조향 펄스 (L)     d : 우 조향 펄스 (R)     f : 조향 중립 (F)
-  s : stop (즉시 정지)     h : 도움말 다시 보기
+  ※ w/x로 속도를 줘도 먼저 g(주행 허용)를 안 보내면 차가 안 움직입니다
+    (펌웨어 워치독 게이트 — s를 누르면 다시 닫히므로 그 다음엔 g부터).
+  g : go (주행 허용, 반드시 먼저)   w/x : 속도 +20/-20   space : 속도 0
+  a : 좌 조향 펄스 (L)              d : 우 조향 펄스 (R)  f : 조향 중립 (F)
+  s : stop (즉시 정지, 게이트도 닫힘)   h : 도움말 다시 보기
 """
 
 
@@ -39,6 +41,7 @@ class TestMission(Mission):
 
     def on_start(self, car, config):
         self._speed = 0
+        self._went_go = False  # 펌웨어 canGo 게이트 미러 — g 전송 전엔 속도를 줘도 안 움직임
         self._stdin_ready = False
         if termios is None:
             print("[test] termios/tty/fcntl 미지원 플랫폼 — 키보드 조종 비활성화 "
@@ -73,6 +76,7 @@ class TestMission(Mission):
     def _handle_key(self, key, car):
         if key == "g":
             car.go()
+            self._went_go = True
             print("go")
         elif key == "w":
             self._set_speed(self._speed + SPEED_STEP, car)
@@ -91,6 +95,7 @@ class TestMission(Mission):
             print("steer F")
         elif key == "s":
             self._speed = 0
+            self._went_go = False
             car.stop()
             print("stop")
         elif key == "h":
@@ -99,7 +104,8 @@ class TestMission(Mission):
     def _set_speed(self, speed, car):
         self._speed = max(-SPEED_LIMIT, min(SPEED_LIMIT, speed))
         car.drive(self._speed)
-        print(f"speed={self._speed}")
+        note = "" if self._went_go else " (아직 g 안 보냄 — 실제로는 안 움직입니다)"
+        print(f"speed={self._speed}{note}")
 
     def on_stop(self, car):
         if self._stdin_ready:
