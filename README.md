@@ -77,6 +77,24 @@ ros2 topic pub /car/cmd/stop std_msgs/msg/Empty {} --once
 
 Foxglove 앱의 "Publish" 패널로도 같은 토픽에 발행할 수 있다.
 
+#### ROS 없이 아두이노만 직접 확인
+
+모터가 안 움직일 때 "ROS/토픽 쪽 문제"와 "펌웨어/배선 쪽 문제"를 구분하고 싶으면
+`tools/hw_test.py`로 ROS를 전혀 거치지 않고 시리얼로 직접 확인한다 — 카메라/라이다/
+`ros2 launch` 전부 필요 없이 아두이노만 연결하면 된다:
+
+```bash
+python3 tools/hw_test.py                       # 전진 + 조향 둘 다
+python3 tools/hw_test.py --forward             # 전진 모듈만
+python3 tools/hw_test.py --no-steer            # 조향만 빼고
+python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
+```
+바퀴를 지면에서 띄운 상태에서 실행할 것 — 실제로 모터가 움직인다. 내부적으로 이미
+`car.go()`를 먼저 호출한 뒤 속도를 주므로 go-게이트 문제는 없다. 이걸로도 안 움직이면
+배선/펌웨어(`car_controller.ino` 업로드 여부, 핀 연결) 문제이고, 이건 움직이는데
+`teleop_node`/`test` 미션으로는 안 움직이면 ROS 쪽(시리얼 포트 자동감지, 토픽 연결
+등)을 의심할 것.
+
 기본값(속도, 정지 거리, 차선 인식 파라미터 등)은 전부 `autodrive_skku_ros/autodrive_skku_ros/config.py`에 있다 — 미션 튜닝값은 ROS 파라미터화하지 않고 그대로 파이썬 모듈로 두었다(대회 전 회귀 위험 최소화).
 
 ## 코드 업데이트 반영 (2회차 이후)
