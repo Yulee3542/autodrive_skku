@@ -4,12 +4,13 @@
 # 그대로 씀 — ROS 통신에 쓰는 포트와 동일한 경로로 업로드도 가능).
 #
 # 사용법:
-#   ./tools/upload_firmware.sh                  # 포트 자동 감지
-#   ./tools/upload_firmware.sh /dev/ttyACM0     # 포트 직접 지정
+#   ./tools/upload_firmware.sh                              # 포트 자동 감지, car_controller 업로드
+#   ./tools/upload_firmware.sh /dev/ttyACM0                 # 포트 직접 지정
+#   ./tools/upload_firmware.sh /dev/ttyACM0 arduino/pin_test  # 다른 스케치 업로드 (예: 핀 진단용)
 set -e
 cd "$(dirname "$0")/.."
 
-SKETCH_DIR="arduino/car_controller"
+SKETCH_DIR="${2:-arduino/car_controller}"
 FQBN="arduino:avr:mega"
 
 if ! command -v arduino-cli >/dev/null 2>&1; then
