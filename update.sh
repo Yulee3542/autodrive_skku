@@ -6,6 +6,13 @@
 set -e
 cd "$(dirname "$0")"
 
+if [ -n "$VIRTUAL_ENV" ]; then
+    echo "Python 가상환경($VIRTUAL_ENV)이 활성화돼 있습니다 — colcon build가 이 venv의"
+    echo "python3를 집어써서 ROS의 rosidl 코드생성(em 모듈 등)이 깨질 수 있습니다."
+    echo "'deactivate' 실행 후 다시 시도하세요."
+    exit 1
+fi
+
 echo "== git pull =="
 git pull --ff-only
 
