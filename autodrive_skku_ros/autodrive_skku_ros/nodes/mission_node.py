@@ -22,6 +22,7 @@ MISSION_DESC = {
     "road": "도로 주행 — 차선 인식/차선 변경/장애물 회피",
     "traffic": "신호등 주행 — 정지선/신호등 인식",
     "t_parking": "T 주차 — 라이다 맵/후방캠 주차선",
+    "test": "수동 테스트 — 자동주행 없음, teleop_node/ros2 topic pub과 병행",
 }
 
 
