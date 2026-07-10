@@ -26,8 +26,8 @@ def check_imports():
             __import__(name)
             print(f"  [OK] {name}")
         except ImportError:
-            print(f"  [X ] {name} — rclpy는 'source /opt/ros/humble/setup.bash', "
-                  "나머지는 rosdep install 필요")
+            print(f"  [X ] {name} — rclpy는 'source /opt/ros/<distro>/setup.bash' "
+                  "(예: humble/jazzy), 나머지는 rosdep install 필요")
             ok = False
     try:
         __import__("rplidar")
@@ -46,7 +46,7 @@ def check_ros_packages():
     ROS 환경이 source되지 않았으면 건너뛴다(치명적이지 않음)."""
     print("\n== ROS 2 패키지 (선택) ==")
     if shutil.which("ros2") is None:
-        print("  (ros2 명령을 찾을 수 없음 — 'source /opt/ros/humble/setup.bash' 필요)")
+        print("  (ros2 명령을 찾을 수 없음 — 'source /opt/ros/<distro>/setup.bash' 필요)")
         return
     try:
         installed = subprocess.run(["ros2", "pkg", "list"], capture_output=True,
@@ -54,9 +54,10 @@ def check_ros_packages():
     except Exception as e:
         print(f"  [X ] ros2 pkg list 실행 실패: {e}")
         return
+    distro = os.environ.get("ROS_DISTRO", "<distro>")
     for name in ("rplidar_ros", "foxglove_bridge"):
         print(f"  [OK] {name}" if name in installed
-              else f"  [- ] {name} 미설치 — sudo apt install ros-humble-{name.replace('_', '-')}")
+              else f"  [- ] {name} 미설치 — sudo apt install ros-{distro}-{name.replace('_', '-')}")
 
 
 def check_cameras():

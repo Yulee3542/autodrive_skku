@@ -3,7 +3,7 @@
 <package format="3">
   <name>autodrive_skku_ros</name>
   <version>0.1.0</version>
-  <description>autodrive_skku 차량 노드/미션 로직 (ROS 2 Humble) — 카메라/라이다/아두이노 브릿지 + Foxglove 모니터링</description>
+  <description>autodrive_skku 차량 노드/미션 로직 (ROS 2) — 카메라/라이다/아두이노 브릿지 + Foxglove 모니터링</description>
   <maintainer email="yulee3542@gmail.com">Yulee3542</maintainer>
   <license>MIT</license>
 

@@ -1,8 +1,8 @@
 # autodrive_skku
 
-국민 AI 자율주행 경진대회 차량 코드. 아두이노 메가(구동 모터 + 스티어링 모터) + 전방 C920 카메라(상/하 분할) + RPLidar(+선택 후방 카메라) 구성이며, **ROS 2(Humble)** launch 한 번으로 모든 센서 노드가 뜨고 미션을 선택해 주행한다. 공식 `foxglove_bridge`가 함께 뜨므로 [Foxglove](https://foxglove.dev/) 앱에서 카메라/라이다/차량 상태를 실시간으로 모니터링할 수 있다.
+국민 AI 자율주행 경진대회 차량 코드. 아두이노 메가(구동 모터 + 스티어링 모터) + 전방 C920 카메라(상/하 분할) + RPLidar(+선택 후방 카메라) 구성이며, **ROS 2** launch 한 번으로 모든 센서 노드가 뜨고 미션을 선택해 주행한다. 공식 `foxglove_bridge`가 함께 뜨므로 [Foxglove](https://foxglove.dev/) 앱에서 카메라/라이다/차량 상태를 실시간으로 모니터링할 수 있다.
 
-주 실행 환경은 **Ubuntu 22.04 + ROS 2 Humble**, 개발용으로 **WSL2**도 지원한다 (카메라/시리얼은 usbipd 연결 필요 — 아래 [WSL2에서 실행](#wsl2에서-실행) 참고).
+주 실행 환경은 **Ubuntu + ROS 2** (대회 권장 조합은 22.04 + Humble이지만 24.04 + Jazzy 등 이미 설치된 배포판도 그대로 동작한다 — `setup.sh`가 `$ROS_DISTRO`를 자동 감지), 개발용으로 **WSL2**도 지원한다 (카메라/시리얼은 usbipd 연결 필요 — 아래 [WSL2에서 실행](#wsl2에서-실행) 참고).
 
 이 저장소는 두 개의 ROS 2 패키지를 담고 있다: 노드/미션 로직인 `autodrive_skku_ros`와 차량 제어 커스텀 메시지 `autodrive_msgs`. 콜콘 워크스페이스의 `src/` 아래 저장소 전체를 clone하면 두 패키지가 함께 빌드된다.
 
