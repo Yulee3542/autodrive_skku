@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
                                  "autodrive_skku_ros"))
 
 from autodrive_skku_ros import config
+from autodrive_skku_ros.missions.road import LANE_CHANGE
 from autodrive_skku_ros.nodes.arduino_node import ArduinoNode
 from autodrive_skku_ros.nodes.ports import autodetect_ports
 
@@ -101,7 +102,7 @@ def main():
         if "forward" in selected:
             test_forward(car, args.speed, args.duration)
         if "steer" in selected:
-            test_steer(car, config.LANE_CHANGE["pulse_gap_s"])
+            test_steer(car, LANE_CHANGE["pulse_gap_s"])
     except KeyboardInterrupt:
         print("\n중단됨")
     finally:

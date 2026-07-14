@@ -13,6 +13,33 @@ from .base import Mission
 from ..nodes.lidar_node import filter_self, rear_min_m
 
 
+# ---------------- 튜닝 파라미터 ----------------
+# T주차 (t_parking 미션) — 주차칸 950x1500mm(규정), 완료 후 3~5초 정지(규정) 기준.
+T_PARKING = dict(
+    side="R",              # 주차 슬롯이 있는 쪽 ('L'/'R') — 당일 코스 확인 후 설정
+    map_scans=30,          # MAP_BUILD에서 누적할 스캔 수
+    slot_gap_min_m=0.60,   # 주차 차량 사이 갭 최소 폭 (슬롯 판정)
+    slot_max_lateral_m=2.0,  # 슬롯 후보로 인정할 최대 측면 거리
+    align_tol_px=25,       # 후방캠 주차선 중점 정렬 허용 오차 (px)
+    align_ticks=5,         # 연속 정렬 판정 틱 수
+    turn_in_pulses=4,      # PARK 진입 조향 펄스 수
+    turn_in_s=2.0,         # 슬롯 방향 후진 회전 구간
+    straighten_s=1.5,      # 반대 조향으로 차체 정렬 구간
+    rear_stop_m=0.30,      # 후방 이 거리 이내면 주차 완료 (뒤 범퍼 기준)
+    hold_s=4.0,            # 완료 후 정지 유지 (규정 3~5초)
+    park_max_s=12.0,       # PARK 상태 안전 타임아웃
+)
+
+# 📏 traffic.py의 STOP_LINE(s_max/v_min)과 반드시 일치해야 함 — 후방캠 주차선도
+# 같은 흰색 규격(대회 규정)이라 두 파일이 같은 값을 쓴다. traffic.py 값이 바뀌면
+# 여기도 확인할 것.
+PARKING_LINE_WHITE = dict(s_max=60, v_min=180)
+
+# 📏 road.py의 LANE_CHANGE['pulse_gap_s']와 동일해야 함 — 둘 다 steer_pulse() 반복
+# 전송 주기이므로 값을 따로 튜닝할 이유가 없다. road.py 값이 바뀌면 여기도 확인할 것.
+PARK_PULSE_GAP_S = 0.15
+
+
 class TParkingMission(Mission):
     """3. T 주차
 
@@ -36,7 +63,7 @@ class TParkingMission(Mission):
 
     def on_start(self, car, config):
         self.config = config
-        self.p = config.T_PARKING
+        self.p = T_PARKING
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self.state = "MAP_BUILD"
         self.scans = deque(maxlen=self.p["map_scans"])  # 맵 빌딩용 라이다 스캔 누적
@@ -54,8 +81,8 @@ class TParkingMission(Mission):
         if self.state == "MAP_BUILD":
             car.drive(self.config.SLOW_SPEED)
             car.steer("F")
-            if sensors["lidar_scan"] is not None:
-                self.map_update(sensors["lidar_scan"])
+            if sensors.get("lidar_scan") is not None:
+                self.map_update(sensors.get("lidar_scan"))
             if self.map_complete():
                 self.state = "FIND_SLOT"
 
@@ -66,7 +93,7 @@ class TParkingMission(Mission):
 
         elif self.state == "REVERSE_ALIGN":
             car.drive(-self.config.SLOW_SPEED)
-            steer = self.reverse_lane_steer(sensors["rear"])
+            steer = self.reverse_lane_steer(sensors.get("rear"))
             if steer is not None:
                 car.steer(steer)
             if self.aligned(sensors):
@@ -88,7 +115,7 @@ class TParkingMission(Mission):
 
     def _park_pulse(self, car, direction, target, now):
         # 펄스 간격은 차선 변경과 동일한 값 공유 (steer_pulse 반복 전송 주기)
-        gap = self.config.LANE_CHANGE["pulse_gap_s"]
+        gap = PARK_PULSE_GAP_S
         if self._park_pulses < target and now - self._park_last_pulse >= gap:
             car.steer_pulse(direction)
             self._park_pulses += 1
@@ -118,7 +145,7 @@ class TParkingMission(Mission):
 
         elif self._park_phase == "CREEP":
             car.drive(-self.config.SLOW_SPEED)
-            steer = self.reverse_lane_steer(sensors["rear"])
+            steer = self.reverse_lane_steer(sensors.get("rear"))
             if steer is not None:
                 car.steer(steer)
             if self.parked(sensors) or in_phase >= self.p["park_max_s"]:
@@ -152,7 +179,7 @@ class TParkingMission(Mission):
         slot_max_lateral_m 이내 점만 취해 bearing 순으로 정렬, 이웃 점 사이
         chord 폭이 slot_gap_min_m 이상이면 두 주차 차량 사이 갭이다.
         """
-        scan = sensors["lidar_scan"]
+        scan = sensors.get("lidar_scan")
         if not scan:
             return False
         cfg = self.config
@@ -182,7 +209,7 @@ class TParkingMission(Mission):
         if cv2 is None or rear_frame is None:
             return None
         try:
-            sl = self.config.STOP_LINE  # 흰색 임계 공유 (s_max/v_min)
+            sl = PARKING_LINE_WHITE  # 흰색 임계 공유 (s_max/v_min)
             h, w = rear_frame.shape[:2]
             roi = rear_frame[h // 2:, :]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
@@ -228,9 +255,9 @@ class TParkingMission(Mission):
     def parked(self, sensors):
         """주차 완료 판정 — 후방(뒤 범퍼 기준) 거리가 연속 3틱 rear_stop_m 이내."""
         cfg = self.config
-        d = rear_min_m(sensors["lidar_scan"], cfg.LIDAR_MOUNT,
+        d = rear_min_m(sensors.get("lidar_scan"), cfg.LIDAR_MOUNT,
                        cfg.LIDAR_REAR_SECTOR, cfg.LIDAR_SELF_MASK_DEG) \
-            if sensors["lidar_scan"] else None
+            if sensors.get("lidar_scan") else None
         if d is not None and d <= self.p["rear_stop_m"]:
             self._parked_count += 1
         else:

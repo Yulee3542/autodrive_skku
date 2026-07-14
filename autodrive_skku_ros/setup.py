@@ -25,9 +25,9 @@ setup(
     tests_require=["pytest"],
     entry_points={
         "console_scripts": [
-            "arduino_bridge_node = autodrive_skku_ros.nodes.arduino_bridge_node:main",
-            "camera_publisher_node = autodrive_skku_ros.nodes.camera_publisher_node:main",
-            "lidar_geometry_node = autodrive_skku_ros.nodes.lidar_geometry_node:main",
+            "arduino_node = autodrive_skku_ros.nodes.arduino_node:ros_main",
+            "camera_node = autodrive_skku_ros.nodes.camera_node:ros_main",
+            "lidar_node = autodrive_skku_ros.nodes.lidar_node:ros_main",
             "mission_node = autodrive_skku_ros.nodes.mission_node:main",
             "teleop_node = autodrive_skku_ros.nodes.teleop_node:main",
         ],

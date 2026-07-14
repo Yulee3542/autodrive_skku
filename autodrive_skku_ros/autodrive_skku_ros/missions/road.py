@@ -6,13 +6,42 @@ except ImportError:
     cv2 = None
 
 from .base import Mission
-from .lane_follow import follow_lane
+from .lane_follow import follow_lane, LANE_EDGE
 from ..nodes.lidar_node import side_clearance_m
 
 try:
     from ..vendor import Function_Library as fl
 except ImportError:  # 패키지 미설치 개발 환경 — 차선 인식 없이 골격만 동작
     fl = None
+
+
+# ---------------- 튜닝 파라미터 ----------------
+# 전방 장애물(흰색 장애물 차량) 카메라 감지 — road 미션 ④.
+# 대회 규격: 장애물 차량·정지선·실선/점선 모두 흰색 → 형태로 구분한다.
+# (차선=가늘고 세로로 김, 정지선=가로로 얇은 밴드, 장애물=폭·높이 모두 큰 블롭)
+OBSTACLE_CAM = dict(
+    s_max=60, v_min=180,        # HSV 흰색: 채도 낮고 밝기 높음
+    roi_top=0.35, roi_bottom=0.95,   # bottom 프레임 세로 ROI (비율)
+    col_lo=0.20, col_hi=0.80,   # 중앙 컬럼 밴드 — 우리 차선의 장애물만
+    min_area_ratio=0.04,        # ROI 면적 대비 블롭 면적비 임계
+    min_w_ratio=0.15,           # ROI 폭 대비 블롭 폭 (차선은 이보다 가늚)
+    min_h_ratio=0.25,           # ROI 높이 대비 블롭 높이 (정지선은 이보다 낮음)
+    min_fill=0.45,              # bbox 채움비 — 대각선 차선은 희박해서 탈락
+)
+
+# 차선 변경 기동 (road 미션 ③④) — 펄스(120ms)↔조향각 매핑 미측정, 전부 실차 튜닝 대상.
+# 근거: 조향 ±20도 → 회전반경 L/tan20 ≈ 1.5m, 차선폭 0.85m → S자 각 구간 헤딩 ~40도.
+# 📏 t_parking.py의 PARK_PULSE_GAP_S가 이 dict의 pulse_gap_s와 동일해야 함 — 값을
+# 바꾸면 그쪽도 확인할 것.
+LANE_CHANGE = dict(
+    pulses=4,          # 진입/복귀 조향 펄스 횟수
+    pulse_gap_s=0.15,  # 펄스 간 최소 간격 (steer_pulse 반복 전송 주기)
+    out_s=1.5,         # 옆 차선으로 나가는 구간 지속 시간
+    back_s=1.5,        # 반대 조향으로 차선 정렬하는 구간
+    straight_s=0.8,    # 직진 안정화 구간
+    speed=80,          # 기동 중 속도
+    cooldown_s=2.0,    # 기동 후 재트리거 억제 시간
+)
 
 
 def detect_obstacle_ahead(frame, cam_cfg):
@@ -66,8 +95,8 @@ class RoadMission(Mission):
     name = "road"
 
     def on_start(self, car, config):
-        assert set(config.LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
-            f"config.LANE_EDGE 키가 예상과 다름: {set(config.LANE_EDGE)}"
+        assert set(LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
+            f"LANE_EDGE 키가 예상과 다름: {set(LANE_EDGE)}"
         self.config = config
         self.env = fl.libCAMERA() if fl is not None else None
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
@@ -90,13 +119,13 @@ class RoadMission(Mission):
 
         # (4) 카메라로 전방 흰색 장애물 감지 → 라이다 측면 여유로 방향 결정
         if now >= self._cooldown_until and \
-                detect_obstacle_ahead(sensors["bottom"], self.config.OBSTACLE_CAM):
-            self.lane_change(car, self.pick_avoid_direction(sensors["lidar_scan"]))
+                detect_obstacle_ahead(sensors.get("bottom"), OBSTACLE_CAM):
+            self.lane_change(car, self.pick_avoid_direction(sensors.get("lidar_scan")))
             self._lane_change_tick(car, now)
             return
 
-        # (2) 차선 인식 주행 — 검증된 파라미터는 config.LANE_EDGE
-        follow_lane(self.env, car, sensors["bottom"], self.config.LANE_EDGE)
+        # (2) 차선 인식 주행 — 검증된 파라미터는 LANE_EDGE
+        follow_lane(self.env, car, sensors.get("bottom"), LANE_EDGE)
 
     def pick_avoid_direction(self, scan):
         """라이다 측면 여유 비교로 회피 방향 결정. 반사 없음(None)=완전히 빈 쪽."""
@@ -120,7 +149,7 @@ class RoadMission(Mission):
           BACK     : 반대 조향 펄스 × 2·pulses, back_s 동안 차선 정렬
           STRAIGHT : direction 쪽 펄스 × pulses로 중립 복귀, straight_s 후 종료
         """
-        lc = self.config.LANE_CHANGE
+        lc = LANE_CHANGE
         self._lc_dir = direction
         self._lc_phase = "OUT"
         self._lc_t0 = self._now()
@@ -135,14 +164,14 @@ class RoadMission(Mission):
         self._lc_last_pulse = 0.0
 
     def _lc_pulse(self, car, direction, target, now):
-        lc = self.config.LANE_CHANGE
+        lc = LANE_CHANGE
         if self._lc_pulses < target and now - self._lc_last_pulse >= lc["pulse_gap_s"]:
             car.steer_pulse(direction)
             self._lc_pulses += 1
             self._lc_last_pulse = now
 
     def _lane_change_tick(self, car, now):
-        lc = self.config.LANE_CHANGE
+        lc = LANE_CHANGE
         opposite = "R" if self._lc_dir == "L" else "L"
         in_phase = now - self._lc_t0
 

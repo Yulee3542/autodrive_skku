@@ -1,3 +1,11 @@
+"""미션 오케스트레이터 — 카메라/라이다/차량상태 토픽을 구독해 sensors dict를
+구성하고 Mission 서브클래스(road/traffic/t_parking/test)를 그대로 구동한다.
+
+ROS 배선(구독/타이머)이 __init__ 안에 인라인되어 있어 다른 노드 파일처럼 순수
+core/ros_main() 분리와 --selftest를 두지 않는다. 이 오케스트레이션 레이어가
+실제로 호출하는 Mission.step() 로직의 테스트는 tools/smoke_test_missions.py
+(FakeCar/FakeClock로 ROS 없이 각 미션 FSM을 직접 구동) 참고.
+"""
 import math
 import sys
 
@@ -5,8 +13,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage, LaserScan
-from std_msgs.msg import Empty, Float32, Int8
-from autodrive_msgs.msg import DriveCmd, SteerCmd
+from std_msgs.msg import Empty, Float32, Int8, Int16, String
 
 try:
     import cv2
@@ -15,7 +22,7 @@ except ImportError:
 
 from .. import config
 from ..missions import MISSIONS
-from .arduino_bridge_node import STATE_UNKNOWN
+from .arduino_node import STATE_UNKNOWN
 from .lidar_node import laserscan_msg_to_tuples
 
 MISSION_DESC = {
@@ -81,8 +88,9 @@ class RosCarProxy:
     def __init__(self, node):
         self._go_pub = node.create_publisher(Empty, "/car/cmd/go", 10)
         self._stop_pub = node.create_publisher(Empty, "/car/cmd/stop", 10)
-        self._drive_pub = node.create_publisher(DriveCmd, "/car/cmd/drive", 10)
-        self._steer_pub = node.create_publisher(SteerCmd, "/car/cmd/steer", 10)
+        self._drive_pub = node.create_publisher(Int16, "/car/cmd/drive", 10)
+        self._steer_pub = node.create_publisher(String, "/car/cmd/steer", 10)
+        self._steer_pulse_pub = node.create_publisher(String, "/car/cmd/steer_pulse", 10)
         self._state = None
         node.create_subscription(Int8, "/car/state", self._on_state, 10)
 
@@ -100,13 +108,13 @@ class RosCarProxy:
         self._stop_pub.publish(Empty())
 
     def drive(self, speed):
-        self._drive_pub.publish(DriveCmd(speed=int(speed)))
+        self._drive_pub.publish(Int16(data=int(speed)))
 
     def steer(self, direction):
-        self._steer_pub.publish(SteerCmd(direction=direction, pulse=False))
+        self._steer_pub.publish(String(data=direction))
 
     def steer_pulse(self, direction):
-        self._steer_pub.publish(SteerCmd(direction=direction, pulse=True))
+        self._steer_pulse_pub.publish(String(data=direction))
 
 
 class MissionNode(Node):
@@ -159,6 +167,7 @@ class MissionNode(Node):
         self._lidar_min_m = None if math.isnan(msg.data) else msg.data
 
     def _tick(self):
+        # sensors dict 스키마: missions/base.py의 Mission 클래스 docstring 참고
         sensors = {
             "top": self._top,
             "bottom": self._bottom,
@@ -176,7 +185,17 @@ class MissionNode(Node):
         super().destroy_node()
 
 
+def _on_sigterm(_signum, _frame):
+    # ros2 launch 종료/kill 등 SIGTERM도 SIGINT와 동일하게 finally에서
+    # node.destroy_node() → Mission.on_stop(car) → car.stop() 발행이 돌게 만든다
+    # (미션 프로세스가 죽어도 마지막 명령대로 차가 계속 움직이지 않도록).
+    raise SystemExit(0)
+
+
 def main(args=None):
+    import signal
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     rclpy.init(args=args)
     try:
         node = MissionNode()
@@ -185,7 +204,7 @@ def main(args=None):
         raise
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         node.destroy_node()

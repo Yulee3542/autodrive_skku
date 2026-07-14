@@ -49,7 +49,7 @@ rosdep install --from-paths src --ignore-src -r -y
 echo "== colcon build (--symlink-install) =="
 # --packages-up-to autodrive_skku_ros: 워크스페이스 src/에 이 프로젝트와 무관한
 # (때로는 깨진) 다른 패키지가 같이 있어도 그것 때문에 빌드가 아예 죽지 않도록
-# 이 프로젝트(+ autodrive_msgs 의존성)만 빌드 대상으로 좁힌다.
+# 이 프로젝트만 빌드 대상으로 좁힌다.
 colcon build --symlink-install --packages-up-to autodrive_skku_ros
 
 cd - >/dev/null

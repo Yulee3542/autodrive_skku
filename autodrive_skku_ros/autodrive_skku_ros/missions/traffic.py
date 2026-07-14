@@ -6,7 +6,7 @@ except ImportError:
     cv2 = None
 
 from .base import Mission
-from .lane_follow import follow_lane
+from .lane_follow import follow_lane, LANE_EDGE
 
 try:
     from ..vendor import Function_Library as fl
@@ -16,6 +16,27 @@ except ImportError:  # 패키지 미설치 개발 환경 — 검증된 상수값
     RED, GREEN = 0, 1
     HUE_THRESHOLD = ([4, 176], [40, 80])
     SATURATION = 150
+    # ⚠ 위 값은 vendor/Function_Library.py의 동일 이름 상수와 반드시 일치해야 함.
+    # vendor 파일은 수정 금지(대회 규정)라 자동 동기화 불가 — Function_Library.py가
+    # 업데이트되면 이 폴백 값도 수동으로 다시 확인할 것.
+
+
+# ---------------- 튜닝 파라미터 ----------------
+# 신호등 판정: 상단 프레임에서 해당 색 픽셀이 이 비율을 넘어야 인식
+TRAFFIC_PIXEL_RATIO = 0.005
+
+# 정지선(흰색) 인식 (traffic 미션 ①). row_fill 0.7: 횡단보도(진행방향 줄무늬,
+# 폭 점유 ~60%)와 세로 차선이 행 채움비를 못 넘게 하는 값.
+# 📏 t_parking.py의 PARKING_LINE_WHITE(s_max/v_min)가 여기 값과 반드시 일치해야
+# 함(후방캠 주차선도 같은 흰색 규격) — 바꾸면 그쪽도 확인할 것.
+STOP_LINE = dict(
+    s_max=60, v_min=180,   # HSV 흰색
+    roi_top=0.55,          # bottom 프레임에서 이 비율 아래 행만 검사 (가까운 노면)
+    row_fill=0.7,          # 행 폭 대비 흰 픽셀 비율 임계
+    min_rows=6,            # 연속으로 임계를 넘어야 하는 행 수
+    wait_max_s=6.0,        # 정지선 대기 중 신호등 미검출 시 재출발까지 시간 (교착 방지)
+    cooldown_s=3.0,        # 재출발 후 같은 정지선 재트리거 억제
+)
 
 
 def detect_light_color(frame, min_ratio=0.005):
@@ -64,8 +85,8 @@ class TrafficMission(Mission):
     name = "traffic"
 
     def on_start(self, car, config):
-        assert set(config.LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
-            f"config.LANE_EDGE 키가 예상과 다름: {set(config.LANE_EDGE)}"
+        assert set(LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
+            f"LANE_EDGE 키가 예상과 다름: {set(LANE_EDGE)}"
         self.config = config
         self.env = fl.libCAMERA() if fl is not None else None
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
@@ -77,7 +98,7 @@ class TrafficMission(Mission):
 
     def step(self, sensors, car):
         now = self._now()
-        color = detect_light_color(sensors["top"], self.config.TRAFFIC_PIXEL_RATIO)
+        color = detect_light_color(sensors.get("top"), TRAFFIC_PIXEL_RATIO)
 
         if color == "red" and self.wait != "red":
             self.wait = "red"
@@ -88,23 +109,23 @@ class TrafficMission(Mission):
             if color == "green":
                 self._resume(car, now)
             elif self.wait == "line" and color is None and \
-                    now - self.wait_t0 >= self.config.STOP_LINE["wait_max_s"]:
+                    now - self.wait_t0 >= STOP_LINE["wait_max_s"]:
                 print("[traffic] 신호등 미검출 — 대기 시간 초과, 재출발")
                 self._resume(car, now)
             return
 
-        if now >= self.cooldown_until and self.stop_line_detected(sensors["bottom"]):
+        if now >= self.cooldown_until and self.stop_line_detected(sensors.get("bottom")):
             self.wait = "line"
             self.wait_t0 = now
             car.drive(0)
             return
 
         car.drive(self.config.DRIVE_SPEED)
-        follow_lane(self.env, car, sensors["bottom"], self.config.LANE_EDGE)
+        follow_lane(self.env, car, sensors.get("bottom"), LANE_EDGE)
 
     def _resume(self, car, now):
         self.wait = None
-        self.cooldown_until = now + self.config.STOP_LINE["cooldown_s"]
+        self.cooldown_until = now + STOP_LINE["cooldown_s"]
         car.drive(self.config.DRIVE_SPEED)
 
     def stop_line_detected(self, bottom_frame):
@@ -117,7 +138,7 @@ class TrafficMission(Mission):
         if cv2 is None or bottom_frame is None:
             return False
         try:
-            sl = self.config.STOP_LINE
+            sl = STOP_LINE
             h, w = bottom_frame.shape[:2]
             roi = bottom_frame[int(h * sl["roi_top"]):, :]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)

@@ -2,14 +2,16 @@
 """나머지 미션(road ③④ / traffic ① / t_parking ①~④) 테스트 구현을 실제
 하드웨어 없이 점검하는 스모크 테스트.
 
-- 라이다: 후방 장착(0도=차량 후방) 지오메트리 순수 함수 검증 + 합성 스캔
 - 카메라: 합성 프레임으로 흰색끼리(차선/정지선/횡단보도/장애물) 교차 오검출 검증
 - 미션: FakeCar(호출 기록) + FakeClock(_now 주입)으로 상태머신 end-to-end
+
+라이다 후방 장착 지오메트리 + ROS LaserScan 변환 순수 함수 테스트는
+nodes/lidar_node.py의 로컬 --selftest로 이관됨
+(python3 -m autodrive_skku_ros.nodes.lidar_node --selftest).
 
 사용법: python tools/smoke_test_missions.py
 (cv2/numpy 필요 — pip install opencv-python-headless numpy)
 """
-import math
 import os
 import sys
 
@@ -25,15 +27,9 @@ except ImportError as e:
     sys.exit(1)
 
 from autodrive_skku_ros import config
-from autodrive_skku_ros.missions.road import RoadMission, detect_obstacle_ahead
-from autodrive_skku_ros.missions.traffic import TrafficMission
-from autodrive_skku_ros.missions.t_parking import TParkingMission
-from autodrive_skku_ros.nodes.lidar_node import (vehicle_bearing_deg, filter_self,
-                                  rear_min_m, side_clearance_m,
-                                  laserscan_msg_to_tuples, scan_to_ranges)
-
-MOUNT = config.LIDAR_MOUNT
-MASK = config.LIDAR_SELF_MASK_DEG
+from autodrive_skku_ros.missions.road import RoadMission, detect_obstacle_ahead, OBSTACLE_CAM, LANE_CHANGE
+from autodrive_skku_ros.missions.traffic import TrafficMission, STOP_LINE
+from autodrive_skku_ros.missions.t_parking import TParkingMission, T_PARKING
 
 
 class FakeCar:
@@ -141,91 +137,12 @@ def check(name, condition):
     return bool(condition)
 
 
-# ---- 1. 라이다 후방 0도 지오메트리 ----
-
-def test_lidar_geometry():
-    print("== 라이다 후방 장착(0도=후방) 지오메트리 ==")
-    ok = True
-    ok &= check("원시 0도 → 차량 bearing ±180 (후방→전방 기준)",
-                abs(abs(vehicle_bearing_deg(0, MOUNT)) - 180.0) < 1e-9)
-    ok &= check("원시 180도 → bearing 0 (차량 전방)",
-                abs(vehicle_bearing_deg(180, MOUNT)) < 1e-9)
-    ok &= check("전방 wedge(|b|<75)는 자차 반사로 제거",
-                filter_self([(15, 180, 500), (15, 170, 500)], MOUNT, MASK) == [])
-    ok &= check("후방/측면 반사는 유지",
-                len(filter_self([(15, 0, 500), (15, 60, 800)], MOUNT, MASK)) == 2)
-    r = rear_min_m([(15, 0, 250)], MOUNT, config.LIDAR_REAR_SECTOR, MASK)
-    ok &= check(f"rear_min_m: 라이다 250mm → 뒤범퍼 기준 {r} == 0.325",
-                r is not None and abs(r - 0.325) < 1e-9)
-    left = side_clearance_m([(15, 270, 800)], "L", MOUNT,
-                            config.LIDAR_SIDE_WINDOW_DEG, MASK)
-    ok &= check(f"side_clearance_m L (원시 270도=좌측 90도) == 0.8",
-                left is not None and abs(left - 0.8) < 1e-9)
-    ok &= check("반대쪽 창엔 안 잡힘",
-                side_clearance_m([(15, 270, 800)], "R", MOUNT,
-                                 config.LIDAR_SIDE_WINDOW_DEG, MASK) is None)
-    # 시뮬 실측: 자차 코너 반사(bearing ~76도, 0.26m)는 근거리 게이트로 제거
-    corner = (15, 256, 260)
-    ok &= check("자차 코너 반사(0.26m)는 측면 여유에서 제외",
-                side_clearance_m([corner], "L", MOUNT,
-                                 config.LIDAR_SIDE_WINDOW_DEG, MASK) is None)
-    both = side_clearance_m([corner, (15, 270, 800)], "L", MOUNT,
-                            config.LIDAR_SIDE_WINDOW_DEG, MASK)
-    ok &= check("코너 반사 섞여도 실제 장애물(0.8m)만 반환",
-                both is not None and abs(both - 0.8) < 1e-9)
-    return ok
-
-
-# ---- 1b. ROS LaserScan ↔ 튜플 변환 (rclpy 없이 순수 함수만 검증) ----
-
-class FakeLaserScan:
-    """sensor_msgs/LaserScan을 흉내내는 최소 더미 — rclpy 설치 없이도 테스트 가능."""
-
-    def __init__(self, ranges, angle_min=-math.pi, angle_increment=None,
-                 range_min=0.05, range_max=12.0):
-        self.ranges = ranges
-        self.angle_min = angle_min
-        self.angle_increment = (2 * math.pi / len(ranges)) if angle_increment is None \
-            else angle_increment
-        self.range_min = range_min
-        self.range_max = range_max
-
-
-def test_scan_conversion():
-    print("== ROS LaserScan ↔ 튜플 변환 (laserscan_msg_to_tuples / scan_to_ranges) ==")
-    ok = True
-
-    # 4점 스캔: 0=angle_min(-180도), 이후 90도 간격. inf/range 밖은 스킵돼야 함.
-    msg = FakeLaserScan(ranges=[1.0, float("inf"), 0.5, 100.0])
-    tuples = laserscan_msg_to_tuples(msg)
-    ok &= check("inf/range_max 밖 레이는 스킵 (4개 중 2개만 남음)", len(tuples) == 2)
-    ok &= check("range_mm 변환 정확 (1.0m → 1000mm)",
-                any(abs(dist_mm - 1000.0) < 1e-6 for _q, _a, dist_mm in tuples))
-    ok &= check("angle_deg 변환 정확 (angle_min=-180도 그대로)",
-                any(abs(angle_deg - (-180.0)) < 1e-6 for _q, angle_deg, _d in tuples))
-
-    # 스캔 없음 → 전부 NaN
-    start, end, ranges_empty = scan_to_ranges([], MOUNT, MASK, n_bins=8)
-    ok &= check("빈 스캔 → 전부 NaN", all(math.isnan(r) for r in ranges_empty))
-    ok &= check("start/end_angle == -pi/+pi",
-                abs(start + math.pi) < 1e-9 and abs(end - math.pi) < 1e-9)
-
-    # 자차 반사(전방 wedge)는 제거되고, 후방 반사는 해당 bin에 남아야 함
-    start, end, ranges_m = scan_to_ranges([(15, 180, 500), (15, 0, 800)], MOUNT, MASK, n_bins=8)
-    ok &= check("전방 자차 반사는 제거되어 전방 bin이 NaN",
-                math.isnan(ranges_m[len(ranges_m) // 2]))
-    ok &= check("후방(bearing 0) 반사는 남음 (NaN 아닌 bin 존재)",
-                any(not math.isnan(r) for r in ranges_m))
-    return ok
-
-
-# ---- 2. 카메라 흰색 구분 (차선/정지선/횡단보도/장애물) ----
+# ---- 1. 카메라 흰색 구분 (차선/정지선/횡단보도/장애물) ----
 
 def test_white_discrimination():
     print("== 흰색끼리 형태 구분 (교차 오검출 방지) ==")
-    cam = config.OBSTACLE_CAM
+    cam = OBSTACLE_CAM
     m = TrafficMission()
-    m.config = config
     ok = True
     ok &= check("장애물 블롭 → 장애물 True", detect_obstacle_ahead(obstacle_frame(), cam))
     ok &= check("세로 차선 → 장애물 False", not detect_obstacle_ahead(lane_line_frame(), cam))
@@ -241,7 +158,7 @@ def test_white_discrimination():
     return ok
 
 
-# ---- 3. traffic 미션 FSM (정지선 대기 / 교착 가드 / 빨간불 / cooldown) ----
+# ---- 2. traffic 미션 FSM (정지선 대기 / 교착 가드 / 빨간불 / cooldown) ----
 
 def test_traffic_fsm():
     print("== traffic 미션 상태머신 ==")
@@ -253,7 +170,7 @@ def test_traffic_fsm():
     m.step(sensors(bottom=stop_line_frame()), car)
     ok &= check("정지선 → 정지 + wait='line'", m.wait == "line" and car.drives[-1] == 0)
 
-    clk.advance(config.STOP_LINE["wait_max_s"] + 0.1)
+    clk.advance(STOP_LINE["wait_max_s"] + 0.1)
     m.step(sensors(bottom=blank()), car)
     ok &= check("신호등 미검출 대기 초과 → 재출발 (교착 방지)",
                 m.wait is None and car.drives[-1] == config.DRIVE_SPEED)
@@ -261,7 +178,7 @@ def test_traffic_fsm():
     m.step(sensors(top=color_frame((0, 0, 0)), bottom=stop_line_frame()), car)
     ok &= check("cooldown 중 정지선 재트리거 안 함", m.wait is None)
 
-    clk.advance(config.STOP_LINE["cooldown_s"] + 0.1)
+    clk.advance(STOP_LINE["cooldown_s"] + 0.1)
     m.step(sensors(top=color_frame((0, 0, 255)), bottom=blank()), car)
     ok &= check("빨간불 → 정지 + wait='red'", m.wait == "red" and car.drives[-1] == 0)
 
@@ -275,7 +192,7 @@ def test_traffic_fsm():
     return ok
 
 
-# ---- 4. road 미션: 회피 방향 + 차선 변경 페이즈 머신 ----
+# ---- 3. road 미션: 회피 방향 + 차선 변경 페이즈 머신 ----
 
 def test_road_lane_change():
     print("== road 미션 장애물 회피 차선 변경 ==")
@@ -293,7 +210,7 @@ def test_road_lane_change():
     m.step(sensors(bottom=obstacle_frame()), car)   # 장애물 → 기동 시작
     ok &= check("장애물 감지 → 차선 변경 시작", m._lc_phase is not None)
 
-    lc = config.LANE_CHANGE
+    lc = LANE_CHANGE
     for _ in range(200):
         if m._lc_phase is None:
             break
@@ -312,7 +229,7 @@ def test_road_lane_change():
     return ok
 
 
-# ---- 5. t_parking 미션 end-to-end ----
+# ---- 4. t_parking 미션 end-to-end ----
 
 def test_t_parking():
     print("== t_parking 상태머신 end-to-end ==")
@@ -320,7 +237,7 @@ def test_t_parking():
     m, car, clk = TParkingMission(), FakeCar(), FakeClock()
     m.on_start(car, config)
     m._now = clk
-    p = config.T_PARKING
+    p = T_PARKING
 
     any_scan = [(15, 0, 3000)]
     for _ in range(p["map_scans"]):
@@ -360,8 +277,6 @@ def test_t_parking():
 
 def main():
     results = [
-        test_lidar_geometry(),
-        test_scan_conversion(),
         test_white_discrimination(),
         test_traffic_fsm(),
         test_road_lane_change(),

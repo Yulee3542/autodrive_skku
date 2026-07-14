@@ -1,3 +1,14 @@
+#!/usr/bin/env python3
+"""아두이노 시리얼 브릿지 — 차량 구동/조향 명령을 시리얼로 중계한다.
+
+ArduinoNode: 시리얼 포트를 직접 소유하는 순수 파이썬 클래스 (ROS 비의존, 워치독
+keepalive 스레드 포함). ros_main()의 ArduinoBridgeNode가 이 클래스를 얇게
+감싸 /car/cmd/go, /car/cmd/stop, /car/cmd/drive(Int16), /car/cmd/steer(String,
+dedup), /car/cmd/steer_pulse(String, 강제) 토픽을 구독해 대응 메서드를 호출하고
+/car/state(Int8)를 발행한다. 시리얼 프로토콜은 README '시리얼 프로토콜' 절 참고.
+
+오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.arduino_node --selftest
+"""
 import threading
 import time
 
@@ -102,3 +113,139 @@ class ArduinoNode:
         time.sleep(0.1)
         if self._ser is not None:
             self._ser.close()
+
+
+# 아두이노 state(0 정지/1 전진/2 후진)가 None(미연결)일 때 Int8로 실어보낼 센티널.
+# 구독 쪽(mission_node)에서 다시 None으로 복원한다.
+STATE_UNKNOWN = -1
+
+
+# ============================ ROS2 래퍼 ============================
+
+def ros_main(args=None):
+    import rclpy
+    from rclpy.node import Node
+    from std_msgs.msg import Empty, Int8, Int16, String
+
+    from .. import config
+    from .ports import autodetect_ports
+
+    class ArduinoBridgeNode(Node):
+        """ArduinoNode(시리얼 프로토콜)를 그대로 소유하고 ROS 토픽만 얹는 얇은 래퍼.
+
+        /car/cmd/go, /car/cmd/stop, /car/cmd/drive(Int16), /car/cmd/steer(String,
+        dedup) /car/cmd/steer_pulse(String, 강제) 구독 → ArduinoNode의 대응 메서드
+        (go/stop/drive/steer/steer_pulse)를 그대로 호출한다. 시리얼 프로토콜·워치독·
+        dedupe 로직은 ArduinoNode에 손대지 않고 그대로 재사용한다.
+        """
+
+        def __init__(self):
+            super().__init__("arduino_bridge_node")
+
+            self.declare_parameter("port", "")
+            self.declare_parameter("baud", config.ARDUINO_BAUD)
+
+            port = self.get_parameter("port").value or None
+            if port is None:
+                port, _lidar = autodetect_ports()
+            baud = self.get_parameter("baud").value
+
+            self._car = ArduinoNode(port, baud)
+
+            self.create_subscription(Empty, "/car/cmd/go", self._on_go, 10)
+            self.create_subscription(Empty, "/car/cmd/stop", self._on_stop, 10)
+            self.create_subscription(Int16, "/car/cmd/drive", self._on_drive, 10)
+            self.create_subscription(String, "/car/cmd/steer", self._on_steer, 10)
+            self.create_subscription(String, "/car/cmd/steer_pulse", self._on_steer_pulse, 10)
+
+            self._state_pub = self.create_publisher(Int8, "/car/state", 10)
+            self.create_timer(1.0 / config.LOOP_HZ, self._publish_state)
+
+        def _on_go(self, _msg):
+            self._car.go()
+
+        def _on_stop(self, _msg):
+            self._car.stop()
+
+        def _on_drive(self, msg):
+            self._car.drive(msg.data)
+
+        def _on_steer(self, msg):
+            self._car.steer(msg.data)
+
+        def _on_steer_pulse(self, msg):
+            self._car.steer_pulse(msg.data)
+
+        def _publish_state(self):
+            state = self._car.state
+            self._state_pub.publish(Int8(data=STATE_UNKNOWN if state is None else state))
+
+        def destroy_node(self):
+            self._car.close()
+            super().destroy_node()
+
+    import signal
+
+    def _on_sigterm(_signum, _frame):
+        # ros2 launch 종료/kill 등 SIGTERM도 SIGINT와 동일하게 finally에서
+        # node.destroy_node() → ArduinoNode.close() → stop()이 돌게 만든다
+        # (모터가 마지막 속도로 계속 도는 것을 방지 — 워치독 500ms보다 즉시 정지가 안전).
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+    rclpy.init(args=args)
+    node = ArduinoBridgeNode()
+    try:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, SystemExit):
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+# ========================= 오프라인 테스트 / 셀프테스트 =========================
+
+def selftest():
+    """시리얼 없이 ArduinoNode의 dedup/펄스/정지 로직만 검증한다."""
+    checks = []
+
+    def check(name, ok):
+        checks.append((name, ok))
+        print(f"[{'OK' if ok else 'X '}] {name}")
+
+    car = ArduinoNode(port=None)  # 포트 없음 → 실제 시리얼 없이 순수 로직만 테스트
+    writes = []
+    car._write = lambda text: writes.append(text)
+
+    car.go()
+    car.go()
+    check("go() 중복 호출은 1회만 전송(dedup)", writes == ["G"])
+
+    writes.clear()
+    car.steer("L")
+    car.steer("L")
+    check("steer() 같은 방향 연속 호출은 1회만 전송(dedup)", writes == ["L"])
+
+    writes.clear()
+    car.steer_pulse("L")
+    car.steer_pulse("L")
+    check("steer_pulse()는 매번 강제 전송", writes == ["L", "L"])
+
+    writes.clear()
+    car._speed = 80
+    car.stop()
+    check("stop()은 속도를 0으로 리셋하고 V0/S를 전송",
+          car._speed == 0 and writes == ["V0\n", "S"])
+
+    passed = sum(1 for _, ok in checks if ok)
+    print(f"{passed}/{len(checks)} 통과")
+    return 0 if passed == len(checks) else 1
+
+
+if __name__ == "__main__":
+    import sys
+    if "--selftest" in sys.argv:
+        sys.exit(selftest())
+    ros_main()

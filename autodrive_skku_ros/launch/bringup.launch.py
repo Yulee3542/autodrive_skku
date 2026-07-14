@@ -15,8 +15,9 @@ Foxglove의 Publish 패널로 /car/cmd/{go,stop,drive,steer}에 직접 명령을
 수동 테스트할 수 있다. 예:
   ros2 launch autodrive_skku_ros bringup.launch.py run_mission:=false
   ros2 topic pub /car/cmd/go std_msgs/msg/Empty {} --once
-  ros2 topic pub /car/cmd/drive autodrive_msgs/msg/DriveCmd "{speed: 80}" --once
-  ros2 topic pub /car/cmd/steer autodrive_msgs/msg/SteerCmd "{direction: 'L', pulse: true}" --once
+  ros2 topic pub /car/cmd/drive std_msgs/msg/Int16 "{data: 80}" --once
+  ros2 topic pub /car/cmd/steer_pulse std_msgs/msg/String "{data: 'L'}" --once
+  ros2 topic pub /car/cmd/steer std_msgs/msg/String "{data: 'F'}" --once
   ros2 topic pub /car/cmd/stop std_msgs/msg/Empty {} --once
 
 arduino_port/lidar_port를 생략하면 시리얼 포트를 자동 감지한다(기존
@@ -58,13 +59,13 @@ def generate_launch_description():
 
     arduino_bridge = Node(
         package="autodrive_skku_ros",
-        executable="arduino_bridge_node",
+        executable="arduino_node",
         parameters=[{"port": LaunchConfiguration("arduino_port")}],
     )
 
     camera_publisher = Node(
         package="autodrive_skku_ros",
-        executable="camera_publisher_node",
+        executable="camera_node",
         parameters=[{
             "front_camera_index": ParameterValue(LaunchConfiguration("front_camera"), value_type=int),
             "rear_camera_index": ParameterValue(LaunchConfiguration("rear_camera"), value_type=int),
@@ -84,7 +85,7 @@ def generate_launch_description():
 
     lidar_geometry = Node(
         package="autodrive_skku_ros",
-        executable="lidar_geometry_node",
+        executable="lidar_node",
     )
 
     mission = Node(

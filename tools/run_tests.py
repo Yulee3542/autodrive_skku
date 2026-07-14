@@ -20,7 +20,9 @@ import importlib
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))  # 형제 스크립트(check_env 등) 임포트용
+_TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _TOOLS_DIR)  # 형제 스크립트(check_env 등) 임포트용
+sys.path.insert(0, os.path.join(os.path.dirname(_TOOLS_DIR), "autodrive_skku_ros"))  # --lidar 단독 실행용
 
 
 class ModuleUnavailable(RuntimeError):
@@ -52,8 +54,9 @@ def _run_env():
 
 
 def _run_lidar():
-    m = _load("smoke_test_missions")
-    return all([m.test_lidar_geometry(), m.test_scan_conversion()])
+    # 순수 지오메트리 함수 테스트는 nodes/lidar_node.py 로컬 셀프테스트로 이관됨
+    m = _load("autodrive_skku_ros.nodes.lidar_node")
+    return m.selftest() == 0
 
 
 def _run_camera():

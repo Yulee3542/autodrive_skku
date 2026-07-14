@@ -4,8 +4,7 @@ import tty
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Empty
-from autodrive_msgs.msg import DriveCmd, SteerCmd
+from std_msgs.msg import Empty, Int16, String
 
 SPEED_STEP = 20
 SPEED_LIMIT = 255
@@ -49,57 +48,74 @@ class TeleopNode(Node):
         super().__init__("teleop_node")
         self._go_pub = self.create_publisher(Empty, "/car/cmd/go", 10)
         self._stop_pub = self.create_publisher(Empty, "/car/cmd/stop", 10)
-        self._drive_pub = self.create_publisher(DriveCmd, "/car/cmd/drive", 10)
-        self._steer_pub = self.create_publisher(SteerCmd, "/car/cmd/steer", 10)
+        self._drive_pub = self.create_publisher(Int16, "/car/cmd/drive", 10)
+        self._steer_pub = self.create_publisher(String, "/car/cmd/steer", 10)
+        self._steer_pulse_pub = self.create_publisher(String, "/car/cmd/steer_pulse", 10)
         self._speed = 0
         self._went_go = False  # 펌웨어 canGo 게이트 미러 — g 전송 전엔 속도를 줘도 안 움직임
 
     def _set_speed(self, speed):
         self._speed = max(-SPEED_LIMIT, min(SPEED_LIMIT, speed))
-        self._drive_pub.publish(DriveCmd(speed=self._speed))
+        self._drive_pub.publish(Int16(data=self._speed))
         note = "" if self._went_go else " (아직 g 안 보냄 — 실제로는 안 움직입니다)"
         print(f"speed={self._speed}{note}")
 
     def run(self):
         print(HELP)
-        while rclpy.ok():
-            key = read_key()
-            if key in ("q", "\x03"):
-                break
-            elif key == "g":
-                self._go_pub.publish(Empty())
-                self._went_go = True
-                print("go")
-            elif key == "w":
-                self._set_speed(self._speed + SPEED_STEP)
-            elif key == "x":
-                self._set_speed(self._speed - SPEED_STEP)
-            elif key == " ":
-                self._set_speed(0)
-            elif key == "a":
-                self._steer_pub.publish(SteerCmd(direction="L", pulse=True))
-                print("steer L")
-            elif key == "d":
-                self._steer_pub.publish(SteerCmd(direction="R", pulse=True))
-                print("steer R")
-            elif key == "f":
-                self._steer_pub.publish(SteerCmd(direction="F", pulse=False))
-                print("steer F")
-            elif key == "s":
-                self._speed = 0
-                self._went_go = False
-                self._stop_pub.publish(Empty())
-                print("stop")
-            elif key == "h":
-                print(HELP)
+        try:
+            while rclpy.ok():
+                key = read_key()
+                if key in ("q", "\x03"):
+                    # raw 터미널 모드라 Ctrl+C(\x03)는 SIGINT가 아니라 그냥 문자로
+                    # 들어온다 — KeyboardInterrupt 예외가 안 나므로 여기서 직접
+                    # break해야 하고, 정지 발행은 finally가 담당한다.
+                    break
+                elif key == "g":
+                    self._go_pub.publish(Empty())
+                    self._went_go = True
+                    print("go")
+                elif key == "w":
+                    self._set_speed(self._speed + SPEED_STEP)
+                elif key == "x":
+                    self._set_speed(self._speed - SPEED_STEP)
+                elif key == " ":
+                    self._set_speed(0)
+                elif key == "a":
+                    self._steer_pulse_pub.publish(String(data="L"))
+                    print("steer L")
+                elif key == "d":
+                    self._steer_pulse_pub.publish(String(data="R"))
+                    print("steer R")
+                elif key == "f":
+                    self._steer_pub.publish(String(data="F"))
+                    print("steer F")
+                elif key == "s":
+                    self._speed = 0
+                    self._went_go = False
+                    self._stop_pub.publish(Empty())
+                    print("stop")
+                elif key == "h":
+                    print(HELP)
+        finally:
+            # 종료 경로(q, Ctrl+C, SIGTERM)와 무관하게 모터에 정지 신호를 남긴다 —
+            # 안 그러면 마지막으로 준 속도로 차가 계속 움직인 채 프로그램만 끝난다.
+            self._stop_pub.publish(Empty())
+            print("[teleop] 종료 — 정지 명령 발행")
+
+
+def _on_sigterm(_signum, _frame):
+    raise SystemExit(0)
 
 
 def main(args=None):
+    import signal
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     rclpy.init(args=args)
     node = TeleopNode()
     try:
         node.run()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         node.destroy_node()
