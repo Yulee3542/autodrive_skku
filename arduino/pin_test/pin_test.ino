@@ -21,8 +21,9 @@ const int RIGHT_IN2 = 25;
 const int STEER_PWM = 2;
 const int STEER_IN1 = 22;
 const int STEER_IN2 = 23;
-// 2026-07: 관측 기준이 흔들려 LEFT/RIGHT/STEER를 순차적으로 잘못 "보정"했다가
-// 운전자 시점으로 통일해 재확인 후 전부 원복함 — car_controller.ino 주석 참고.
+// 2026-07: 핀 배선은 최초 그대로 유지(이 진단 스케치는 순수 GPIO 레벨 확인이
+// 목적이라 일부러 안 건드림). 실제 방향 보정은 car_controller.ino에서 명령
+// 해석 단계(L/R 분기, setDrive 부호)로 옮겨서 처리함 — 그쪽 주석 참고.
 
 const int SPIN_MS = 1000;
 const int PAUSE_MS = 500;

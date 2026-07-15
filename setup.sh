@@ -10,6 +10,10 @@
 set -e
 cd "$(dirname "$0")"
 
+# git이 실행권한을 못 지키고 넘어올 때가 있어(Windows 쪽에서 커밋된 경우 등)
+# 셸 스크립트는 실행할 때마다 알아서 +x를 다시 걸어준다.
+chmod +x setup.sh update.sh tools/upload_firmware.sh 2>/dev/null || true
+
 if [ -n "$VIRTUAL_ENV" ]; then
     echo "Python 가상환경($VIRTUAL_ENV)이 활성화돼 있습니다 — colcon build가 이 venv의"
     echo "python3를 집어써서 ROS의 rosidl 코드생성(em 모듈 등)이 깨질 수 있습니다."

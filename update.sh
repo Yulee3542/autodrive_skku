@@ -16,6 +16,10 @@ fi
 echo "== git pull =="
 git pull --ff-only
 
+# git이 실행권한을 못 지키고 넘어올 때가 있어(Windows 쪽에서 커밋된 경우 등)
+# pull 직후 매번 다시 +x를 걸어준다.
+chmod +x setup.sh update.sh tools/upload_firmware.sh 2>/dev/null || true
+
 WS_ROOT="$(cd ../.. && pwd)"
 cd "$WS_ROOT"
 

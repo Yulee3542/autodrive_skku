@@ -27,12 +27,12 @@ const int RIGHT_IN2 = 25;
 const int STEER_PWM = 2;
 const int STEER_IN1 = 22;
 const int STEER_IN2 = 23;
-// 2026-07 실측 경위: 초기 pin_test.ino 관측(관측 기준 불명확)에서 LEFT/RIGHT/
-// STEER 극성이 잘못됐다고 판단해 IN1/IN2를 순차적으로 뒤바꿨었으나, "운전자
-// 기준(차 뒤에서 앞을 보는 시점)"으로 통일해 재확인한 결과 세 채널 모두 원래
-// 극성(위 값 그대로)이 정확했던 것으로 확인돼 전부 원복함. 회전방향/좌우 판단은
-// 반드시 고정된 기준(운전자 시점 등)으로 재현 가능하게 확인할 것 — 기준이
-// 흔들리면 이전처럼 잘못된 "보정"을 반복하게 된다.
+// 2026-07 실측 경위: LEFT/RIGHT/STEER IN1/IN2 핀 레벨에서 여러 번 뒤바꿔봤지만
+// 실차 테스트마다 결과가 뒤집혀서(관측 기준이 흔들렸을 가능성) 신뢰하기 어려웠음.
+// 그래서 핀 배선(위 값)은 최초 그대로 두고, 대신 "명령이 뜻하는 방향" 자체를
+// setDrive()/readSerialCommand()의 L·R 분기 한 곳에서만 반전시키는 방식으로
+// 전환함 — 핀 레벨보다 추적/롤백이 훨씬 쉽다. 방향 재확인은 반드시 고정된
+// 기준(예: "운전자가 뒤에서 앞을 보는 시점")으로 재현 가능하게 할 것.
 
 const int POT_PIN = A0;  // 조향 POT (2026-07 실장착: A0) — 미장착이어도 analogRead는 안전(플로팅값만 나감)
 
@@ -120,15 +120,22 @@ void readSerialCommand() {
       steerStop();
     }
     else if (cmd == 'L') {
-      steerLeft();
+      // 2026-07 실측: 위 setDrive()와 같은 이유로 명령 해석 단계에서 반전.
+      // PC가 보내는 'L'(좌회전 요청)을 물리적으로 steerRight()가 처리하도록 함.
+      steerRight();
     }
     else if (cmd == 'R') {
-      steerRight();
+      steerLeft();
     }
   }
 }
 
 void setDrive(int speed) {
+  // 2026-07 실측: GPIO 극성(IN1/IN2)을 여러 번 뒤집어봐도 방향이 계속 안 맞아
+  // 핀 레벨 대신 명령 해석 단계에서 한 곳만 뒤집기로 함 — "전진 명령(양수)"의
+  // 의미 자체를 반전. G/1, '2', V<int> 전부 이 함수를 거치므로 여기 한 줄이면
+  // 충분하다 (harness/배선 자체를 더 건드리지 않음).
+  speed = -speed;
   speed = constrain(speed, -255, 255);
 
   if (speed > 0) {
