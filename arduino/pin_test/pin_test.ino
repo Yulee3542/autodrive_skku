@@ -15,15 +15,15 @@ const int LEFT_IN1 = 26;
 const int LEFT_IN2 = 27;
 
 const int RIGHT_PWM = 3;
-const int RIGHT_IN1 = 24;
-const int RIGHT_IN2 = 25;
+// 우측 모터가 좌측과 마주보게 장착돼 있어 실제 하드웨어 보정이 필요함(2026-07
+// 확인, car_controller.ino와 동일) — 이건 명령 해석이 아니라 진짜 배선/마운트
+// 사실이라 진단 스케치인 이 파일에도 반영함. LEFT/STEER는 원래 값 그대로 유지.
+const int RIGHT_IN1 = 25;
+const int RIGHT_IN2 = 24;
 
 const int STEER_PWM = 2;
 const int STEER_IN1 = 22;
 const int STEER_IN2 = 23;
-// 2026-07: 핀 배선은 최초 그대로 유지(이 진단 스케치는 순수 GPIO 레벨 확인이
-// 목적이라 일부러 안 건드림). 실제 방향 보정은 car_controller.ino에서 명령
-// 해석 단계(L/R 분기, setDrive 부호)로 옮겨서 처리함 — 그쪽 주석 참고.
 
 const int SPIN_MS = 1000;
 const int PAUSE_MS = 500;

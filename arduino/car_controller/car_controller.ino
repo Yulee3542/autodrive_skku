@@ -21,18 +21,24 @@ const int LEFT_IN1 = 26;
 const int LEFT_IN2 = 27;
 
 const int RIGHT_PWM = 3;
-const int RIGHT_IN1 = 24;
-const int RIGHT_IN2 = 25;
+// 우측 모터는 좌측과 마주보게(대칭) 장착돼 있어, LEFT와 같은 극성을 주면 실제
+// 회전방향이 반대로 나온다. 2026-07 최종 확인(LEFT/STEER를 명령 해석 단계에서
+// 반전한 뒤 RIGHT만 단독으로 반대로 도는 것을 확인, 다른 변수 없이 격리된
+// 결과) — RIGHT만 IN1/IN2를 뒤바꿔 보정한다. 배선은 그대로.
+const int RIGHT_IN1 = 25;
+const int RIGHT_IN2 = 24;
 
 const int STEER_PWM = 2;
 const int STEER_IN1 = 22;
 const int STEER_IN2 = 23;
-// 2026-07 실측 경위: LEFT/RIGHT/STEER IN1/IN2 핀 레벨에서 여러 번 뒤바꿔봤지만
-// 실차 테스트마다 결과가 뒤집혀서(관측 기준이 흔들렸을 가능성) 신뢰하기 어려웠음.
-// 그래서 핀 배선(위 값)은 최초 그대로 두고, 대신 "명령이 뜻하는 방향" 자체를
-// setDrive()/readSerialCommand()의 L·R 분기 한 곳에서만 반전시키는 방식으로
-// 전환함 — 핀 레벨보다 추적/롤백이 훨씬 쉽다. 방향 재확인은 반드시 고정된
-// 기준(예: "운전자가 뒤에서 앞을 보는 시점")으로 재현 가능하게 할 것.
+// 2026-07 실측 경위: LEFT/RIGHT/STEER IN1/IN2 핀 레벨에서 처음부터 여러 번
+// 뒤바꿔봤지만 재확인할 때마다 결과가 뒤집혀서(관측 기준이 흔들렸을 가능성)
+// 신뢰하기 어려웠음. 그래서 LEFT/STEER 방향은 핀 배선을 안 건드리고 "명령이
+// 뜻하는 방향" 자체를 setDrive()/readSerialCommand()의 L·R 분기 한 곳에서만
+// 반전시키는 방식으로 전환함 — 이후 격리된 재확인으로 LEFT/STEER는 정상,
+// RIGHT만 마운트 대칭 문제로 별도 보정이 필요함을 확인(바로 위 RIGHT_IN1/IN2).
+// 방향 재확인은 반드시 고정된 기준(예: "운전자가 뒤에서 앞을 보는 시점")으로
+// 재현 가능하게 할 것.
 
 const int POT_PIN = A0;  // 조향 POT (2026-07 실장착: A0) — 미장착이어도 analogRead는 안전(플로팅값만 나감)
 
