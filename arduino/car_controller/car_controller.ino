@@ -1,5 +1,9 @@
 // autodrive_skku 차량 펌웨어 (실차 검증본 run_test_fixed.ino 기반)
 //
+// 방향 극성(전진/후진, 좌/우 조향, RIGHT 모터 마운트 보정)은 2026-07 실차
+// 주행으로 확정 완료 — 아래 RIGHT_IN1/IN2, setDrive(), readSerialCommand()의
+// L/R 분기가 그 결과다. 추가로 손댈 필요 없음.
+//
 // 시리얼 프로토콜 (9600bps) — README '시리얼 프로토콜' 절과 동일하게 유지할 것
 //   PC -> Arduino:
 //     G / 1        주행 허용 (V 미수신 상태면 기본 속도로 전진)
@@ -22,23 +26,15 @@ const int LEFT_IN2 = 27;
 
 const int RIGHT_PWM = 3;
 // 우측 모터는 좌측과 마주보게(대칭) 장착돼 있어, LEFT와 같은 극성을 주면 실제
-// 회전방향이 반대로 나온다. 2026-07 최종 확인(LEFT/STEER를 명령 해석 단계에서
-// 반전한 뒤 RIGHT만 단독으로 반대로 도는 것을 확인, 다른 변수 없이 격리된
-// 결과) — RIGHT만 IN1/IN2를 뒤바꿔 보정한다. 배선은 그대로.
+// 회전방향이 반대로 나온다 — IN1/IN2를 뒤바꿔 보정(배선은 그대로).
 const int RIGHT_IN1 = 25;
 const int RIGHT_IN2 = 24;
 
 const int STEER_PWM = 2;
 const int STEER_IN1 = 22;
 const int STEER_IN2 = 23;
-// 2026-07 실측 경위: LEFT/RIGHT/STEER IN1/IN2 핀 레벨에서 처음부터 여러 번
-// 뒤바꿔봤지만 재확인할 때마다 결과가 뒤집혀서(관측 기준이 흔들렸을 가능성)
-// 신뢰하기 어려웠음. 그래서 LEFT/STEER 방향은 핀 배선을 안 건드리고 "명령이
-// 뜻하는 방향" 자체를 setDrive()/readSerialCommand()의 L·R 분기 한 곳에서만
-// 반전시키는 방식으로 전환함 — 이후 격리된 재확인으로 LEFT/STEER는 정상,
-// RIGHT만 마운트 대칭 문제로 별도 보정이 필요함을 확인(바로 위 RIGHT_IN1/IN2).
-// 방향 재확인은 반드시 고정된 기준(예: "운전자가 뒤에서 앞을 보는 시점")으로
-// 재현 가능하게 할 것.
+// LEFT/STEER는 핀 배선이 원래부터 맞았음 — 방향 보정은 setDrive()/
+// readSerialCommand()의 L·R 분기(명령 해석 단계)에서 처리한다.
 
 const int POT_PIN = A0;  // 조향 POT (2026-07 실장착: A0) — 미장착이어도 analogRead는 안전(플로팅값만 나감)
 
@@ -126,8 +122,8 @@ void readSerialCommand() {
       steerStop();
     }
     else if (cmd == 'L') {
-      // 2026-07 실측: 위 setDrive()와 같은 이유로 명령 해석 단계에서 반전.
-      // PC가 보내는 'L'(좌회전 요청)을 물리적으로 steerRight()가 처리하도록 함.
+      // PC가 보내는 'L'(좌회전 요청)을 물리적으로 steerRight()가 처리 — 실차
+      // 방향 확정 결과(파일 상단 참고).
       steerRight();
     }
     else if (cmd == 'R') {
@@ -137,10 +133,8 @@ void readSerialCommand() {
 }
 
 void setDrive(int speed) {
-  // 2026-07 실측: GPIO 극성(IN1/IN2)을 여러 번 뒤집어봐도 방향이 계속 안 맞아
-  // 핀 레벨 대신 명령 해석 단계에서 한 곳만 뒤집기로 함 — "전진 명령(양수)"의
-  // 의미 자체를 반전. G/1, '2', V<int> 전부 이 함수를 거치므로 여기 한 줄이면
-  // 충분하다 (harness/배선 자체를 더 건드리지 않음).
+  // "전진 명령(양수)"의 물리적 의미를 여기서 반전 — G/1, '2', V<int> 전부 이
+  // 함수를 거치므로 한 줄로 충분. 실차 방향 확정 결과(파일 상단 참고).
   speed = -speed;
   speed = constrain(speed, -255, 255);
 

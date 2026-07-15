@@ -15,9 +15,9 @@ const int LEFT_IN1 = 26;
 const int LEFT_IN2 = 27;
 
 const int RIGHT_PWM = 3;
-// 우측 모터가 좌측과 마주보게 장착돼 있어 실제 하드웨어 보정이 필요함(2026-07
-// 확인, car_controller.ino와 동일) — 이건 명령 해석이 아니라 진짜 배선/마운트
-// 사실이라 진단 스케치인 이 파일에도 반영함. LEFT/STEER는 원래 값 그대로 유지.
+// 우측 모터가 좌측과 마주보게 장착돼 있어 하드웨어 보정 필요(car_controller.ino와
+// 동일 — 명령 해석이 아니라 실제 배선/마운트 사실이라 이 진단 스케치에도 반영).
+// LEFT/STEER는 원래 핀 값 그대로.
 const int RIGHT_IN1 = 25;
 const int RIGHT_IN2 = 24;
 
