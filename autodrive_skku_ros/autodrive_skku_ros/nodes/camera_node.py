@@ -38,6 +38,10 @@ class CameraNode:
     None|"CW"|"CCW"|"180" — 후방 카메라에는 적용하지 않는다.
     """
 
+    # WSL2의 usbipd USB 패스스루는 UVC(isochronous) 스트림이 중간에 끊기는 경우가
+    # 있다(vhci_hcd urb->status -104) — 이 횟수만큼 연속 read 실패 시 재연결 시도.
+    _MAX_CONSEC_FAILS = 90  # 실제 FPS와 무관한 루프이므로 대략 1~수 초 분량
+
     def __init__(self, front_index, rear_index=None, split=True,
                  width=640, height=480, rotate=None):
         self._split = split
@@ -47,6 +51,10 @@ class CameraNode:
         self._lock = threading.Lock()
         self._front_frame = None
         self._rear_frame = None
+        self._front_index = front_index
+        self._rear_index = rear_index
+        self._front_fails = 0
+        self._rear_fails = 0
         self._front = self._open(front_index, "front")
         self._rear = self._open(rear_index, "rear") if rear_index is not None else None
         self._running = self._front is not None or self._rear is not None
@@ -76,15 +84,33 @@ class CameraNode:
             if self._front is not None:
                 ok, frame = self._front.read()
                 if ok:
+                    self._front_fails = 0
                     if self._rotate is not None:
                         frame = cv2.rotate(frame, self._rotate)
                     with self._lock:
                         self._front_frame = frame
+                else:
+                    self._front = self._on_read_fail(self._front, "front", self._front_index)
             if self._rear is not None:
                 ok, frame = self._rear.read()
                 if ok:
+                    self._rear_fails = 0
                     with self._lock:
                         self._rear_frame = frame
+                else:
+                    self._rear = self._on_read_fail(self._rear, "rear", self._rear_index)
+
+    def _on_read_fail(self, cap, name, index):
+        fails_attr = f"_{name}_fails"
+        fails = getattr(self, fails_attr) + 1
+        setattr(self, fails_attr, fails)
+        if fails < self._MAX_CONSEC_FAILS:
+            return cap
+        print(f"[camera] {name}({index}) 연속 {fails}회 읽기 실패 — 재연결 시도 "
+              f"(WSL2라면 usbipd 스트림 끊김일 수 있음)")
+        cap.release()
+        setattr(self, fails_attr, 0)
+        return self._open(index, name)
 
     def latest(self):
         """(top_frame, bottom_frame). split이면 전방 프레임의 상/하 절반."""
