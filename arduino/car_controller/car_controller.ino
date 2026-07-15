@@ -15,7 +15,7 @@
 //     F            스티어링 모터 즉시 정지
 //   Arduino -> PC:
 //     0 / 1 / 2    상태 (정지/전진/후진)
-//     P <adc>      조향 POT 원시값(A0, 0~1023), 50ms마다 — 항상 보냄(미장착이면
+//     P <adc>      조향 POT 원시값(A6, 0~1023), 50ms마다 — 항상 보냄(미장착이면
 //                  플로팅값이라 의미 없는 숫자, 값 자체로 장착 여부 판단 불가).
 //                  전용 보드 아니고 이 메가에 직결 — 모터 제어와 같은 시리얼
 //                  왕복이라 캘리브레이션/향후 폐루프 조향에 지연 없이 바로 쓸 수 있음.
@@ -36,7 +36,7 @@ const int STEER_IN2 = 23;
 // LEFT/STEER는 핀 배선이 원래부터 맞았음 — 방향 보정은 setDrive()/
 // readSerialCommand()의 L·R 분기(명령 해석 단계)에서 처리한다.
 
-const int POT_PIN = A0;  // 조향 POT (2026-07 실장착: A0) — 미장착이어도 analogRead는 안전(플로팅값만 나감)
+const int POT_PIN = A6;  // 조향 POT (2026-07 실장착: A6) — 미장착이어도 analogRead는 안전(플로팅값만 나감)
 
 const int DEFAULT_SPEED = 100;
 const int STEER_SPEED = 160;
@@ -200,7 +200,7 @@ void printState(int state) {
 }
 
 void printPot() {
-  // POT 미장착이면 A2가 플로팅이라 값이 의미 없음 — 그래도 라인 자체는 계속
+  // POT 미장착이면 A6가 플로팅이라 값이 의미 없음 — 그래도 라인 자체는 계속
   // 보낸다. "진짜 POT이 있는지"는 파이썬 쪽에서 풀락 스윕 중 실제로 값이
   // 유의미하게 움직이는지로 판단한다(이 펌웨어는 하드웨어 유무를 모름).
   unsigned long now = millis();

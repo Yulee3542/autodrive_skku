@@ -163,7 +163,7 @@ class ArduinoNode:
         있었음(예: 5펄스 만에 [348,347,349,348,348]로 멈춰 좌/우가 348/347로
         거의 같아짐 — 실제 풀락은 346/350).
 
-        POT이 실제로 없어도 A0가 플로팅이라 펌웨어는 계속 "P <adc>" 라인을
+        POT이 실제로 없어도 A6가 플로팅이라 펌웨어는 계속 "P <adc>" 라인을
         보낸다 — 그래서 "라인이 오는지"가 아니라 "스윕해봤더니 ADC가 실제로
         min_span 이상 움직였는지"로 진짜 POT 장착 여부를 판단한다.
 
@@ -413,7 +413,7 @@ def selftest():
 
     # POT 미장착 시뮬레이션: 펄스를 줘도 ADC가 거의 안 움직임 → 스킵돼야 함
     nopot_car = ArduinoNode(port=None)
-    nopot_car.pot_adc = 512  # 플로팅 A0의 노이즈 섞인 고정값 흉내
+    nopot_car.pot_adc = 512  # 플로팅 A6의 노이즈 섞인 고정값 흉내
     nopot_car._write = lambda text: None
     nopot_car.steer_pulse = lambda d: None  # 펄스를 줘도 ADC 불변(POT 미연결)
     adc_left2, adc_right2 = nopot_car.calibrate_steering(
