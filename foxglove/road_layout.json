@@ -1,0 +1,37 @@
+{
+  "configById": {
+    "Image!front": {
+      "cameraTopic": "/camera/bottom",
+      "mode": "fit",
+      "synchronize": false
+    },
+    "Image!back": {
+      "cameraTopic": "/camera/rear",
+      "mode": "fit",
+      "synchronize": false
+    },
+    "3D!lidar": {}
+  },
+  "layout": {
+    "direction": "row",
+    "first": "Image!front",
+    "second": {
+      "direction": "row",
+      "first": "Image!back",
+      "second": "3D!lidar",
+      "splitPercentage": 50
+    },
+    "splitPercentage": 34
+  },
+  "panelTitleById": {
+    "Image!front": "camera/front (→ /camera/bottom, 차선)",
+    "Image!back": "camera/back (→ /camera/rear)",
+    "3D!lidar": "lidar (→ /scan)"
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "linkedGlobalVariables": [],
+  "playbackConfig": {
+    "speed": 1
+  }
+}
