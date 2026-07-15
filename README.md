@@ -245,6 +245,8 @@ WSL2에서 개발 중이면 Windows 쪽 Foxglove 앱은 WSL 내부 IP(`ip addr s
 
 POT이 없으면(펄스를 줘도 ADC가 안 바뀌면) 자동으로 조용히 스킵되고 기존 펄스 방식 그대로 동작한다 — 항상 켜둬도 안전하다. 단, **캘리브레이션 중 바퀴가 실제로 좌우로 움직이므로** 바퀴를 띄우거나 장애물 없는 곳에서 기동할 것(정 안 되면 `calibrate_steering:=false`).
 
+📏 2026-07 실측: 지금 장착된 POT은 조향 링키지와 완전한 1:1 커플링이 아니라, 풀락 좌우(±20도, 총 40도) 스윙에도 ADC가 4카운트 정도밖에 안 바뀐다 — `calibrate_steering()`의 `min_span`/`stable_tol`/`recenter_tol` 기본값이 이 좁은 실측 범위 기준으로 맞춰져 있다(`arduino_node.py` 참고). 이 상태에서 `/car/steering_angle`은 사실상 좌/중앙/우 정도만 구분되는 거친 해상도다 — 더 정밀하게 쓰려면 POT-조향 커플링(백래시 등)을 기계적으로 개선해야 한다.
+
 ---
 
 ## 아키텍처 참고 (개발자용)
@@ -287,6 +289,8 @@ python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 | 증상 | 해결 |
 |------|------|
 | `/dev/ttyUSB0` permission denied | `./setup.sh`가 dialout 그룹에 추가함 — **재로그인** 필요 |
+| `could not open port ...: Device or resource busy` | 다른 프로세스가 이미 그 포트를 잡고 있음 — `screen`으로 시리얼 모니터링하다 안 끄고 나갔을 때 흔함(`screen -ls`로 남은 세션 확인 후 `screen -X -S <세션> quit`, 또는 `fuser`/`lsof /dev/ttyACM*`로 PID 찾아서 `kill`) |
+| `/dev/ttyACM0`이 없다고 나옴(`ls`했을 때 안 보임) | 아두이노가 `/dev/ttyACM1` 등 다른 번호로 잡혔을 수 있음(연결 순서에 따라 바뀜) — `ls /dev/ttyACM* /dev/ttyUSB*`로 실제 번호 확인 후 `arduino_port:=`로 직접 지정 |
 | 카메라 열기 실패 | 다른 프로그램이 점유 중인지 확인, WSL2면 [usbipd attach](#wsl2에서-실행) |
 | 아두이노/라이다 포트 뒤바뀜 | `arduino_port:=`/`lidar_port:=` launch 인자로 직접 지정 |
 | 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `teleop_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `teleop_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |

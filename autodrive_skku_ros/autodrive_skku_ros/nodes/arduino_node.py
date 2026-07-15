@@ -126,7 +126,7 @@ class ArduinoNode:
             self._ser.close()
 
     def calibrate_steering(self, max_pulses=40, settle_s=0.18, stable_count=3,
-                            stable_tol=3, min_span=30, recenter_tol=4,
+                            stable_tol=1, min_span=3, recenter_tol=1,
                             pot_timeout_s=2.0):
         """조향 POT 기준 좌/우 풀락 ADC를 실측하고, 중앙으로 복귀시킨 뒤 반환한다.
 
@@ -135,9 +135,16 @@ class ArduinoNode:
         각 방향 max_pulses가 상한 — 스토퍼를 못 찾아도 기어박스에 무리가 가지
         않도록 여기서 반드시 멈춘다.
 
-        POT이 실제로 없어도 A2가 플로팅이라 펌웨어는 계속 "P <adc>" 라인을
+        POT이 실제로 없어도 A0가 플로팅이라 펌웨어는 계속 "P <adc>" 라인을
         보낸다 — 그래서 "라인이 오는지"가 아니라 "스윕해봤더니 ADC가 실제로
         min_span 이상 움직였는지"로 진짜 POT 장착 여부를 판단한다.
+
+        📏 min_span/stable_tol/recenter_tol 기본값은 2026-07 실측(조향 링키지가
+        POT과 완전히 1:1로 안 물려 있어, 좌우 풀락(±20도, 총 40도) 스윙이
+        ADC 기준 4카운트 정도밖에 안 됨) 기준으로 아주 좁게 잡혀 있다 — 이 범위
+        때문에 /car/steering_angle 해상도는 사실상 좌/중앙/우 수준으로 거칠다.
+        POT-조향 커플링을 기계적으로 개선하면(백래시 줄이기 등) 이 값들을
+        다시 키워서 더 정밀하게 쓸 수 있다.
 
         반환: (adc_left, adc_right) — POT 미장착/응답없음이면 (None, None).
         """
@@ -378,7 +385,7 @@ def selftest():
 
     # POT 미장착 시뮬레이션: 펄스를 줘도 ADC가 거의 안 움직임 → 스킵돼야 함
     nopot_car = ArduinoNode(port=None)
-    nopot_car.pot_adc = 512  # 플로팅 A2의 노이즈 섞인 고정값 흉내
+    nopot_car.pot_adc = 512  # 플로팅 A0의 노이즈 섞인 고정값 흉내
     nopot_car._write = lambda text: None
     nopot_car.steer_pulse = lambda d: None  # 펄스를 줘도 ADC 불변(POT 미연결)
     adc_left2, adc_right2 = nopot_car.calibrate_steering(
@@ -386,6 +393,24 @@ def selftest():
         min_span=30, recenter_tol=4, pot_timeout_s=0.2)
     check("POT 미장착(값 불변)이면 캘리브레이션 스킵 → (None, None)",
           adc_left2 is None and adc_right2 is None)
+
+    # 2026-07-16 실측 회귀 테스트: 조향 링키지-POT 커플링이 1:1이 아니라 풀락
+    # 스윙이 ADC 4카운트 정도(346~350)밖에 안 되는 실제 하드웨어 — 기본
+    # 파라미터(min_span=3 등)로도 "미장착"으로 스킵되지 않고 잡혀야 한다.
+    narrow_car = ArduinoNode(port=None)
+    narrow_car.pot_adc = 348
+    narrow_car._write = lambda text: None
+
+    def narrow_steer_pulse(direction):
+        if direction == "L":
+            narrow_car.pot_adc = max(346, narrow_car.pot_adc - 1)
+        elif direction == "R":
+            narrow_car.pot_adc = min(350, narrow_car.pot_adc + 1)
+    narrow_car.steer_pulse = narrow_steer_pulse
+
+    adc_left3, adc_right3 = narrow_car.calibrate_steering(settle_s=0, pot_timeout_s=0.2)
+    check("좁은 실측 범위(ADC 4카운트)도 기본 파라미터로 캘리브레이션됨(스킵 안 됨)",
+          adc_left3 is not None and adc_right3 is not None)
 
     passed = sum(1 for _, ok in checks if ok)
     print(f"{passed}/{len(checks)} 통과")
