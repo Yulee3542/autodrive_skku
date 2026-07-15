@@ -62,3 +62,30 @@ WHEEL_RADIUS_M = 0.10
 STEERING_LIMIT_DEG = 20
 FRONT_CAMERA_SENSOR_HFOV_DEG = 78   # Logitech C920 spec (센서 자체, landscape 기준)
 FRONT_CAMERA_MOUNT_VFOV_DEG = 78    # portrait 마운트 후 실효 수직화각 (sim 기준, hfov<->vfov 교환)
+
+# ---- odometry_node 지면 투영 외부 파라미터 (미측정). model.sdf에 카메라 z가
+# 0.47(계산치)/0.795(실측치, 규정 75cm 마운트 상한 초과로 플래그됨) 두 값으로
+# 남아있어 서로 불일치 — 실차 측정 시 어느 쪽도 그대로 믿지 말고 새로 잴 것.
+# height_m/tilt_deg가 None이면 estimate_visual_motion()이 항상 ok=False로
+# 비활성 동작한다 (미장착 라이다 판정과 같은 fail-inert 방식).
+CAMERA_MOUNT = dict(height_m=None, tilt_deg=None)
+
+# ---- odometry_node 융합 파라미터. pwm_to_mps 미측정 시 커맨드-적분 항은 항상
+# 0(정지)으로 취급된다 — PWM/조향 매핑과 마찬가지로 실차 튜닝 대상.
+# min_pot_span_counts: arduino_node의 자체 min_span(POT "장착 여부" 판정, 기본 3)과
+# 별개로, odometry가 POT 각도를 "신뢰"할지 정하는 자체 기준. 2026-07-16 실측
+# 링크 커플링은 풀락 스윙이 ADC 4카운트뿐이라(min_span=3은 통과) 캘리브레이션
+# 자체는 성공하지만 각도 분해능이 너무 거칠다 — 이 임계값 아래면 POT 각도를
+# 쓰지 않고 펄스 카운트 적분으로 폴백한다. 링크→기어 교체 후 스윙이 넓어지면
+# 자동으로 POT 쪽을 쓰게 된다(코드 변경 불필요).
+ODOMETRY = dict(
+    pwm_to_mps=None,
+    deg_per_pulse=None,   # POT 폴백(펄스 카운트 적분)용. 미측정 시 조향각 0(직진)으로 취급
+    min_pot_span_counts=8,
+    vo_min_features=15,
+    vo_min_inliers=10,
+    fusion_vo_weight_max=0.8,
+    goodfeatures=dict(maxCorners=200, qualityLevel=0.01, minDistance=7, blockSize=7),
+    lk_win_size=(21, 21),
+    lk_max_level=3,
+)

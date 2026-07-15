@@ -278,11 +278,14 @@ def ros_main(args=None):
 
             self._adc_left = None
             self._adc_right = None
+            self._adc_span = None
             if self.get_parameter("calibrate_steering").value:
                 self.get_logger().info("조향 캘리브레이션 시작 (좌/우 풀락 탐색)...")
                 self._adc_left, self._adc_right = self._car.calibrate_steering()
                 if self._adc_left is None:
                     self.get_logger().warn("조향 POT 미검출 — 캘리브레이션 없이 펄스 방식으로 동작")
+                else:
+                    self._adc_span = abs(self._adc_left - self._adc_right)
 
             self.create_subscription(Empty, "/car/cmd/go", self._on_go, 10)
             self.create_subscription(Empty, "/car/cmd/stop", self._on_stop, 10)
@@ -293,6 +296,13 @@ def ros_main(args=None):
             self._state_pub = self.create_publisher(Int8, "/car/state", 10)
             self._pot_pub = self.create_publisher(Int32, "/car/steering_pot", 10)
             self._angle_pub = self.create_publisher(Float32, "/car/steering_angle", 10)
+            # 캘리브레이션 성공 시의 좌/우 풀락 ADC 차이 — odometry_node가 POT 각도를
+            # 신뢰할지 판단하는 데 쓴다(config.ODOMETRY.min_pot_span_counts). 이
+            # min_span(장착 여부 판정, 기본 3)보다 엄격한 별도 기준이 필요한 이유는
+            # calibrate_steering()의 실측 로그 참고 — 2026-07 실측 링크 커플링은
+            # 풀락 스윙이 ADC 4카운트뿐이라 min_span=3은 통과해도 각도 분해능은
+            # 너무 거칠다.
+            self._span_pub = self.create_publisher(Int32, "/car/steering_pot_span", 10)
             self.create_timer(1.0 / config.LOOP_HZ, self._publish_state)
 
         def _on_go(self, _msg):
@@ -322,6 +332,7 @@ def ros_main(args=None):
                 deg = adc_to_deg(adc, self._adc_left, self._adc_right,
                                   config.STEERING_LIMIT_DEG, -config.STEERING_LIMIT_DEG)
                 self._angle_pub.publish(Float32(data=deg))
+                self._span_pub.publish(Int32(data=self._adc_span))
 
         def destroy_node(self):
             self._car.close()

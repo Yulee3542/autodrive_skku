@@ -16,6 +16,13 @@ class Mission:
       go() / stop() / drive(speed: -255..255, 음수=후진)
       steer('F'|'L'|'R')  — 스티어링 모터 펄스 (같은 값 연속 호출 무시)
       steer_pulse(d)      — 펄스 강제 반복 전송 (주차 기동용)
+
+    참고: odometry_node(IEEE 5520874 기반 VO+커맨드-적분 융합 상대 오도메트리)가
+    /car/pose(PoseStamped, 상대 좌표 — 전역/GPS 기준 아님)와
+    /car/pose_confidence(Float32)를 별도로 발행한다. 아직 mission_node가 이를
+    구독해 sensors dict에 넣어주지는 않으므로(계획된 후속 작업), 현재는
+    ros2 topic echo나 Foxglove로만 확인 가능 — config.CAMERA_MOUNT/
+    ODOMETRY.pwm_to_mps 실측 전까지는 confidence=0(사실상 비활성)이다.
     """
 
     name = "base"

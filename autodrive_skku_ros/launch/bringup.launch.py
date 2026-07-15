@@ -23,11 +23,17 @@ Foxglove의 Publish 패널로 /car/cmd/{go,stop,drive,steer}에 직접 명령을
 arduino_port/lidar_port를 생략하면 시리얼 포트를 자동 감지한다(기존
 tools/ports.py의 autodetect_ports()를 launch 생성 시점에 그대로 재사용).
 
-calibrate_steering:=true(기본값)면 arduino_node가 뜰 때 조향 POT(A2) 좌/우
+calibrate_steering:=true(기본값)면 arduino_node가 뜰 때 조향 POT(A6) 좌/우
 풀락을 자동으로 찾는다 — 바퀴가 몇 초간 실제로 좌우로 움직이니 반드시 바퀴를
 띄우거나 장애물 없는 곳에서 기동할 것. POT 미장착 차량이면 자동으로 스킵되므로
 평소엔 그냥 둬도 되고, 정말 바퀴를 못 움직이는 상황(예: 정비 중)에서만
 calibrate_steering:=false로 끌 것.
+
+run_odometry:=true(기본값)면 odometry_node가 함께 뜬다 — VO(시각 오도메트리)와
+커맨드-적분(가짜 데드레커닝)을 융합해 /car/pose(PoseStamped, 상대 좌표),
+/car/pose_confidence(Float32)를 발행한다. config.CAMERA_MOUNT/ODOMETRY.pwm_to_mps가
+아직 미측정이라 실측 전까지는 confidence=0으로 사실상 비활성 동작 — 평소엔 켜둬도
+무해하다.
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -67,6 +73,12 @@ def generate_launch_description():
         description="true면 arduino_node 기동 시 조향 POT 좌/우 풀락을 1회 자동 "
                      "탐색(수 초 소요, 바퀴가 실제로 움직임). POT 미장착이면 "
                      "자동으로 조용히 스킵됨. 바퀴를 못 띄운 상태 등에서는 false로.")
+    run_odometry_arg = DeclareLaunchArgument(
+        "run_odometry", default_value="true",
+        description="false면 odometry_node 없이 기동. config.CAMERA_MOUNT/"
+                     "ODOMETRY.pwm_to_mps 실측 전에는 어차피 confidence=0으로 "
+                     "비활성 동작하므로 평소엔 켜둬도 무해함 — 순수 카메라/조향 "
+                     "점검 세션 등에서만 끌 것.")
 
     arduino_bridge = Node(
         package="autodrive_skku_ros",
@@ -103,6 +115,12 @@ def generate_launch_description():
         executable="lidar_node",
     )
 
+    odometry = Node(
+        package="autodrive_skku_ros",
+        executable="odometry_node",
+        condition=IfCondition(LaunchConfiguration("run_odometry")),
+    )
+
     mission = Node(
         package="autodrive_skku_ros",
         executable="mission_node",
@@ -126,6 +144,7 @@ def generate_launch_description():
     return LaunchDescription([
         run_mission_arg, mission_arg, arduino_port_arg, lidar_port_arg,
         front_camera_arg, rear_camera_arg, show_arg, foxglove_port_arg,
-        calibrate_steering_arg,
-        arduino_bridge, camera_publisher, rplidar, lidar_geometry, mission, foxglove_bridge,
+        calibrate_steering_arg, run_odometry_arg,
+        arduino_bridge, camera_publisher, rplidar, lidar_geometry, odometry, mission,
+        foxglove_bridge,
     ])
