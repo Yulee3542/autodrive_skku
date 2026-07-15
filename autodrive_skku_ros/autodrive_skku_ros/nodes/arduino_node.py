@@ -125,26 +125,28 @@ class ArduinoNode:
         if self._ser is not None:
             self._ser.close()
 
-    def calibrate_steering(self, max_pulses=40, settle_s=0.18, stable_count=3,
-                            stable_tol=1, min_span=3, recenter_tol=1,
-                            pot_timeout_s=2.0):
+    def calibrate_steering(self, max_pulses=40, min_pulses=8, settle_s=0.18,
+                            stable_count=3, stable_tol=1, min_span=3,
+                            recenter_tol=1, pot_timeout_s=2.0):
         """조향 POT 기준 좌/우 풀락 ADC를 실측하고, 중앙으로 복귀시킨 뒤 반환한다.
 
-        방향별로 steer_pulse()를 반복하면서 ADC가 stable_count회 연속
-        stable_tol 이내로 안 바뀌면 기계적 풀락(스토퍼)에 닿았다고 판단한다.
-        각 방향 max_pulses가 상한 — 스토퍼를 못 찾아도 기어박스에 무리가 가지
-        않도록 여기서 반드시 멈춘다.
+        방향별로 steer_pulse()를 반복하면서, 최소 min_pulses는 무조건 채운
+        뒤부터 ADC가 stable_count회 연속 stable_tol 이내로 안 바뀌면 기계적
+        풀락(스토퍼)에 닿았다고 판단한다. 각 방향 max_pulses가 최종 상한 —
+        스토퍼를 못 찾아도 기어박스에 무리가 가지 않도록 여기서 반드시 멈춘다.
+        풀락 값은 마지막 stable_count개 읽음값의 평균으로 잡아 ADC 노이즈를
+        줄인다.
+
+        📏 min_pulses가 필요한 이유(2026-07 실측): 조향 링키지-POT 스윙이
+        ADC 기준 4카운트 정도로 좁아 ADC 노이즈(±1~2)와 신호가 비슷한 크기다
+        — min_pulses 없이 stable_count(3)만으로 판정하면 실제 풀락에 도달하기
+        전에 노이즈가 우연히 "안정된 것처럼" 보여 너무 일찍 멈추는 문제가
+        있었음(예: 5펄스 만에 [348,347,349,348,348]로 멈춰 좌/우가 348/347로
+        거의 같아짐 — 실제 풀락은 346/350).
 
         POT이 실제로 없어도 A0가 플로팅이라 펌웨어는 계속 "P <adc>" 라인을
         보낸다 — 그래서 "라인이 오는지"가 아니라 "스윕해봤더니 ADC가 실제로
         min_span 이상 움직였는지"로 진짜 POT 장착 여부를 판단한다.
-
-        📏 min_span/stable_tol/recenter_tol 기본값은 2026-07 실측(조향 링키지가
-        POT과 완전히 1:1로 안 물려 있어, 좌우 풀락(±20도, 총 40도) 스윙이
-        ADC 기준 4카운트 정도밖에 안 됨) 기준으로 아주 좁게 잡혀 있다 — 이 범위
-        때문에 /car/steering_angle 해상도는 사실상 좌/중앙/우 수준으로 거칠다.
-        POT-조향 커플링을 기계적으로 개선하면(백래시 줄이기 등) 이 값들을
-        다시 키워서 더 정밀하게 쓸 수 있다.
 
         반환: (adc_left, adc_right) — POT 미장착/응답없음이면 (None, None).
         """
@@ -157,18 +159,21 @@ class ArduinoNode:
 
         def sweep(direction):
             history = []
-            for _ in range(max_pulses):
+            for i in range(max_pulses):
                 self.steer_pulse(direction)
                 time.sleep(settle_s)
                 adc = self.pot_adc
                 if adc is None:
                     continue
                 history.append(adc)
-                if len(history) >= stable_count and \
+                if i + 1 >= min_pulses and len(history) >= stable_count and \
                         max(history[-stable_count:]) - min(history[-stable_count:]) <= stable_tol:
                     break
             print(f"[arduino] {direction} 스윕: {len(history)}펄스, 기록={history}")
-            return history[-1] if history else None
+            if not history:
+                return None
+            tail = history[-stable_count:]
+            return sum(tail) / len(tail)
 
         adc_left = sweep("L")
         adc_right = sweep("R")
