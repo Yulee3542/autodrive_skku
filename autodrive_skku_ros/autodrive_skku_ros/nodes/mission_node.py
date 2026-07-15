@@ -127,18 +127,18 @@ class MissionNode(Node):
         self.declare_parameter("mission", "")
         self.declare_parameter("show", False)
 
-        self._top = None
-        self._bottom = None
-        self._rear = None
+        self._front = None
+        self._back = None
         self._lidar_scan = None
         self._lidar_min_m = None
 
-        self.create_subscription(CompressedImage, "/camera/top",
-                                  self._make_image_cb("top"), 10)
-        self.create_subscription(CompressedImage, "/camera/bottom",
-                                  self._make_image_cb("bottom"), 10)
-        self.create_subscription(CompressedImage, "/camera/rear",
-                                  self._make_image_cb("rear"), 10)
+        self.declare_parameter("split", config.CAMERA_SPLIT)
+        self._split = self.get_parameter("split").value
+
+        self.create_subscription(CompressedImage, "/camera/front",
+                                  self._make_image_cb("front"), 10)
+        self.create_subscription(CompressedImage, "/camera/back",
+                                  self._make_image_cb("back"), 10)
         self.create_subscription(LaserScan, "/scan", self._on_scan, 10)
         self.create_subscription(Float32, "/lidar/rear_min_m", self._on_rear_min, 10)
 
@@ -166,18 +166,31 @@ class MissionNode(Node):
     def _on_rear_min(self, msg):
         self._lidar_min_m = None if math.isnan(msg.data) else msg.data
 
+    def _split_front(self):
+        """/camera/front 한 장을 신호등용(top)/차선용(bottom)으로 나눈다 —
+        camera_node는 물리 카메라 2대에 맞춰 front/back만 발행하고, 이 분할은
+        detection(mission_node) 책임이다."""
+        frame = self._front
+        if frame is None:
+            return None, None
+        if not self._split:
+            return frame, frame
+        h = frame.shape[0]
+        return frame[:h // 2, :], frame[h // 2:, :]
+
     def _tick(self):
         # sensors dict 스키마: missions/base.py의 Mission 클래스 docstring 참고
+        top, bottom = self._split_front()
         sensors = {
-            "top": self._top,
-            "bottom": self._bottom,
-            "rear": self._rear,
+            "top": top,
+            "bottom": bottom,
+            "rear": self._back,
             "lidar_min_m": self._lidar_min_m,
             "lidar_scan": self._lidar_scan,
             "state": self._car.state,
         }
         self._mission.step(sensors, self._car)
-        if self._show and not show_frames(self._top, self._bottom, self._rear):
+        if self._show and not show_frames(top, bottom, self._back):
             self._show = False
 
     def destroy_node(self):

@@ -6,10 +6,12 @@ ARDUINO_BAUD = 9600
 LIDAR_PORT = None        # 예: "/dev/ttyUSB0"
 LIDAR_BAUD = 115200
 
-# 카메라: C920 한 대를 상/하로 분할해 사용 (상단=신호등, 하단=차선)
+# 카메라: 물리적으로 2대(전방/후방) — camera_node는 /camera/front, /camera/back만
+# 발행하고, 전방 프레임을 신호등용(top)/차선용(bottom)으로 나누는 건 detection
+# 쪽(mission_node)이 담당한다.
 FRONT_CAMERA = 0         # /dev/video0
 REAR_CAMERA = None       # T주차용 후방 카메라 인덱스. 없으면 None
-CAMERA_SPLIT = True      # False면 전방 프레임 전체를 top/bottom 양쪽에 그대로 전달
+CAMERA_SPLIT = True      # False면 mission_node가 top/bottom 양쪽에 원본 프레임을 그대로 전달
 FRAME_WIDTH = 640        # 캡처 요청 해상도 — 센서 네이티브(랜드스케이프) 기준, 회전 전
 FRAME_HEIGHT = 480
 

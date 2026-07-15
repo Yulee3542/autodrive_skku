@@ -3,9 +3,10 @@
 
 CameraNode: 백그라운드 스레드로 카메라를 계속 읽는 순수 파이썬 클래스 (ROS
 비의존). ros_main()의 CameraPublisherNode가 이 클래스를 얇게 감싸 타이머로
-최신 프레임을 /camera/top, /camera/bottom, /camera/rear에 CompressedImage(jpeg)로
-발행한다. cv_bridge 불필요 — CompressedImage는 순수 bytes라 cv2.imencode 결과를
-그대로 담는다.
+최신 프레임을 /camera/front, /camera/back에 CompressedImage(jpeg)로 발행한다.
+카메라가 물리적으로 2대(전방/후방)이므로 토픽도 딱 2개 — 전방 프레임을 신호등용/
+차선용으로 상하 분할하는 건 이 노드가 아니라 detection 쪽(mission_node)의 몫이다.
+cv_bridge 불필요 — CompressedImage는 순수 bytes라 cv2.imencode 결과를 그대로 담는다.
 
 오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.camera_node --selftest
 """
@@ -31,8 +32,9 @@ if cv2 is not None:
 class CameraNode:
     """전방 C920(+선택 후방) 카메라를 백그라운드 스레드로 계속 읽는다.
 
-    split=True(기본)면 전방 프레임을 상/하 절반으로 나눠 latest()가
-    (top=신호등용, bottom=차선용)을 반환한다. 후방 카메라는 rear()로 접근.
+    front()가 전방 프레임(회전 보정만 적용, 분할 없음)을, rear()가 후방
+    프레임을 반환한다 — 신호등용/차선용으로 나누는 건 detection 쪽(mission_node)
+    책임이라 이 클래스는 관여하지 않는다.
 
     rotate: 전방 카메라가 portrait(세로)로 물리 마운트된 경우의 회전 보정.
     None|"CW"|"CCW"|"180" — 후방 카메라에는 적용하지 않는다.
@@ -42,9 +44,8 @@ class CameraNode:
     # 있다(vhci_hcd urb->status -104) — 이 횟수만큼 연속 read 실패 시 재연결 시도.
     _MAX_CONSEC_FAILS = 90  # 실제 FPS와 무관한 루프이므로 대략 1~수 초 분량
 
-    def __init__(self, front_index, rear_index=None, split=True,
+    def __init__(self, front_index, rear_index=None,
                  width=640, height=480, rotate=None):
-        self._split = split
         self._width = width
         self._height = height
         self._rotate = _ROTATE_MAP.get(rotate)
@@ -112,16 +113,9 @@ class CameraNode:
         setattr(self, fails_attr, 0)
         return self._open(index, name)
 
-    def latest(self):
-        """(top_frame, bottom_frame). split이면 전방 프레임의 상/하 절반."""
+    def front(self):
         with self._lock:
-            frame = self._front_frame
-        if frame is None:
-            return None, None
-        if self._split:
-            h = frame.shape[0]
-            return frame[:h // 2, :], frame[h // 2:, :]
-        return frame, frame
+            return self._front_frame
 
     def rear(self):
         with self._lock:
@@ -150,9 +144,10 @@ def ros_main(args=None):
     from .. import config
 
     class CameraPublisherNode(Node):
-        """CameraNode(캡처/상하분할/회전 보정)를 그대로 소유하고, 타이머로 최신
-        프레임을 /camera/top, /camera/bottom, /camera/rear에 CompressedImage(jpeg)로
-        발행한다.
+        """CameraNode(캡처/회전 보정)를 그대로 소유하고, 타이머로 최신 프레임을
+        /camera/front, /camera/back에 CompressedImage(jpeg)로 발행한다. 신호등용/
+        차선용 상하 분할은 여기서 하지 않는다 — mission_node가 /camera/front를
+        받아서 필요할 때 나눠 쓴다.
         """
 
         def __init__(self):
@@ -161,7 +156,6 @@ def ros_main(args=None):
             self.declare_parameter("front_camera_index", config.FRONT_CAMERA)
             self.declare_parameter("rear_camera_index", NO_REAR_CAMERA
                                     if config.REAR_CAMERA is None else config.REAR_CAMERA)
-            self.declare_parameter("split", config.CAMERA_SPLIT)
             self.declare_parameter("rotate", config.FRONT_CAMERA_ROTATE or "")
             self.declare_parameter("jpeg_quality", 80)
 
@@ -173,15 +167,13 @@ def ros_main(args=None):
             self._cameras = CameraNode(
                 self.get_parameter("front_camera_index").value,
                 rear_index,
-                split=self.get_parameter("split").value,
                 width=config.FRAME_WIDTH,
                 height=config.FRAME_HEIGHT,
                 rotate=rotate,
             )
 
-            self._top_pub = self.create_publisher(CompressedImage, "/camera/top", 10)
-            self._bottom_pub = self.create_publisher(CompressedImage, "/camera/bottom", 10)
-            self._rear_pub = self.create_publisher(CompressedImage, "/camera/rear", 10)
+            self._front_pub = self.create_publisher(CompressedImage, "/camera/front", 10)
+            self._back_pub = self.create_publisher(CompressedImage, "/camera/back", 10)
 
             self.create_timer(1.0 / config.LOOP_HZ, self._tick)
 
@@ -198,11 +190,8 @@ def ros_main(args=None):
             publisher.publish(msg)
 
         def _tick(self):
-            top, bottom = self._cameras.latest()
-            rear = self._cameras.rear()
-            self._publish_frame(self._top_pub, top)
-            self._publish_frame(self._bottom_pub, bottom)
-            self._publish_frame(self._rear_pub, rear)
+            self._publish_frame(self._front_pub, self._cameras.front())
+            self._publish_frame(self._back_pub, self._cameras.rear())
 
         def destroy_node(self):
             self._cameras.close()
@@ -222,9 +211,9 @@ def ros_main(args=None):
 # ========================= 오프라인 테스트 / 셀프테스트 =========================
 
 def selftest():
-    """실제 카메라를 열지 않고 CameraNode.latest()의 상하 분할 로직과 portrait
-    회전 후 shape만 검증한다 (tools/smoke_test_lane_follow.py::test_portrait_
-    rotation_shapes와 동일한 관심사를 이 파일 로컬로도 확인)."""
+    """실제 카메라를 열지 않고 CameraNode.front()/rear()의 순수 접근자 로직과
+    portrait 회전 후 shape만 검증한다 (tools/smoke_test_lane_follow.py::test_
+    portrait_rotation_shapes와 동일한 관심사를 이 파일 로컬로도 확인)."""
     if cv2 is None:
         print("[X ] opencv 미설치 — 카메라 셀프테스트 불가")
         return 1
@@ -236,24 +225,17 @@ def selftest():
         checks.append((name, ok))
         print(f"[{'OK' if ok else 'X '}] {name}")
 
-    # __init__을 거치지 않고(=실제 카메라를 열지 않고) latest()의 순수 분할 로직만 검증
+    # __init__을 거치지 않고(=실제 카메라를 열지 않고) front()/rear()만 검증
     cam = CameraNode.__new__(CameraNode)
-    cam._split = True
     cam._lock = threading.Lock()
     cam._front_frame = np.zeros((480, 640, 3), dtype=np.uint8)
     cam._rear_frame = None
 
-    top, bottom = cam.latest()
-    check("split=True: top/bottom 모두 (240, 640, 3)",
-          top.shape == (240, 640, 3) and bottom.shape == (240, 640, 3))
-
-    cam._split = False
-    top, bottom = cam.latest()
-    check("split=False: top == bottom == 원본 프레임", top is bottom is cam._front_frame)
+    check("front(): 원본 프레임 그대로 반환", cam.front() is cam._front_frame)
+    check("rear(): 프레임 없으면 None", cam.rear() is None)
 
     cam._front_frame = None
-    top, bottom = cam.latest()
-    check("프레임 없으면 (None, None)", top is None and bottom is None)
+    check("front(): 프레임 없으면 None", cam.front() is None)
 
     rotated = cv2.rotate(np.zeros((480, 640, 3), dtype=np.uint8), cv2.ROTATE_90_CLOCKWISE)
     check("portrait 마운트(CW 회전) 후 shape (640, 480, 3)", rotated.shape == (640, 480, 3))

@@ -1,12 +1,12 @@
 {
   "configById": {
     "Image!front": {
-      "cameraTopic": "/camera/bottom",
+      "cameraTopic": "/camera/front",
       "mode": "fit",
       "synchronize": false
     },
     "Image!back": {
-      "cameraTopic": "/camera/rear",
+      "cameraTopic": "/camera/back",
       "mode": "fit",
       "synchronize": false
     },
@@ -24,8 +24,8 @@
     "splitPercentage": 34
   },
   "panelTitleById": {
-    "Image!front": "camera/front (→ /camera/bottom, 차선)",
-    "Image!back": "camera/back (→ /camera/rear)",
+    "Image!front": "camera/front (전방, 신호등+차선 통짜)",
+    "Image!back": "camera/back (후방)",
     "3D!lidar": "lidar (→ /scan)"
   },
   "globalVariables": {},
