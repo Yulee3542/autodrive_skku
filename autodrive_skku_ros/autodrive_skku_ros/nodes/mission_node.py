@@ -13,6 +13,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid
 from sensor_msgs.msg import CompressedImage, LaserScan
 from std_msgs.msg import Empty, Float32, Int8, Int16, String
 
@@ -241,6 +242,13 @@ class MissionNode(Node):
         튜닝 확인용으로는 충분하다. 실패해도 미션 루프에는 영향 없음."""
         if cv2 is None or not self.get_parameter("debug.overlay").value:
             return
+        occ = self._mission.debug.get("occupancy")
+        if occ is not None:
+            try:
+                self._publish_occupancy(occ)
+            except Exception as e:
+                self.get_logger().warning(f"점유 격자 발행 실패: {e}",
+                                          throttle_duration_sec=5.0)
         top, bottom = self._split_front()
         frames = {"top": top, "bottom": bottom, "rear": self._back}
         for key, dbg in list(self._mission.debug.items()):
@@ -267,6 +275,26 @@ class MissionNode(Node):
             except Exception as e:
                 self.get_logger().warning(f"오버레이({key}) 발행 실패: {e}",
                                           throttle_duration_sec=5.0)
+
+    def _publish_occupancy(self, occ):
+        """t_parking 점유 격자를 nav_msgs/OccupancyGrid로 발행 (frame_id=odom —
+        Foxglove 3D 패널에서 /car/pose, /lidar/scan_corrected와 함께 겹쳐 보임)."""
+        x0, y0, res, n, data = occ.to_ros_grid_data()
+        pub = self._overlay_pubs.get("occupancy")
+        if pub is None:
+            pub = self.create_publisher(OccupancyGrid, "/debug/occupancy", 1)
+            self._overlay_pubs["occupancy"] = pub
+        msg = OccupancyGrid()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "odom"
+        msg.info.resolution = float(res)
+        msg.info.width = n
+        msg.info.height = n
+        msg.info.origin.position.x = float(x0)
+        msg.info.origin.position.y = float(y0)
+        msg.info.origin.orientation.w = 1.0
+        msg.data = data
+        pub.publish(msg)
 
     def destroy_node(self):
         self._mission.on_stop(self._car)

@@ -86,7 +86,14 @@ def _run_road():
 
 
 def _run_parking():
-    return _load("smoke_test_missions").test_t_parking()
+    m = _load("smoke_test_missions")
+    return all([m.test_t_parking(), m.test_t_parking_occupancy()])
+
+
+def _run_occupancy_grid():
+    # 순수 격자 로직(정합/역변환/chord)은 missions/occupancy.py 로컬 셀프테스트로 관리
+    m = _load("autodrive_skku_ros.missions.occupancy")
+    return m.selftest() == 0
 
 
 def _run_tuning():
@@ -110,6 +117,7 @@ MODULES = {
     "traffic": ("traffic 미션 상태머신 (정지선/신호등)", _run_traffic),
     "road": ("road 미션 장애물 회피 차선 변경", _run_road),
     "parking": ("t_parking 미션 상태머신 end-to-end", _run_parking),
+    "occupancy": ("T주차 점유 격자 (odom 정합/스캔 역변환/chord 갭)", _run_occupancy_grid),
     "tuning": ("ROS 파라미터 ↔ 튜닝 dict 바인딩 (flatten/apply, in-place 검증)", _run_tuning),
     "debug_viz": ("디버그 오버레이 드로잉 + 감지기 debug out-dict (headless)", _run_debug_viz),
 }

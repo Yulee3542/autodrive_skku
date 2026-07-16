@@ -10,6 +10,7 @@ except ImportError:
     np = None
 
 from .base import Mission, traveled_m
+from .occupancy import OccupancyMap
 from .. import config as _config
 from ..nodes.lidar_node import filter_self, rear_min_m
 
@@ -32,6 +33,10 @@ T_PARKING = dict(
     park_max_s=12.0,       # PARK 상태 안전 타임아웃
     white_s_max=None, white_v_min=None,  # 주차선 흰색 override (None=config.WHITE_HSV)
     min_pose_conf=0.3,     # 이 이상이어야 오도메트리 거리 기록/사용 (0=미보정, 비활성)
+    # 점유 격자 (오도메트리 신뢰 가능할 때만 활성 — 미보정 시 deque 폴백)
+    occ_size_m=8.0,        # 격자 한 변 (미션 시작 pose가 중앙)
+    occ_res_m=0.05,        # 셀 크기
+    occ_min_hits=2,        # 이 이상 히트여야 점유 확정 (1회 노이즈 걸러냄)
 )
 
 
@@ -63,6 +68,7 @@ class TParkingMission(Mission):
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self.state = "MAP_BUILD"
         self.scans = deque(maxlen=self.p["map_scans"])  # 맵 빌딩용 라이다 스캔 누적
+        self.occ = None             # 점유 격자 — 오도메트리 신뢰 가능해지면 생성
         self._slot = None           # (bearing_deg, dist_m) — slot_found가 기록
         self._last_err_px = None    # reverse_lane_steer가 기록하는 주차선 중점 오차
         self._align_count = 0
@@ -81,7 +87,7 @@ class TParkingMission(Mission):
             car.drive(self.config.SLOW_SPEED)
             car.steer("F")
             if sensors.get("lidar_scan") is not None:
-                self.map_update(sensors.get("lidar_scan"))
+                self.map_update(sensors.get("lidar_scan"), sensors)
             if self.map_complete():
                 self.state = "FIND_SLOT"
 
@@ -173,13 +179,25 @@ class TParkingMission(Mission):
 
     # ---- 판정 로직 ----
 
-    def map_update(self, scan):
-        """(1단계) 스캔 누적. deque(maxlen=map_scans)라 최신 스캔만 유지된다.
+    def map_update(self, scan, sensors):
+        """(1단계) 스캔 누적.
 
-        오도메트리가 없어 점유 격자 정합은 불가 — 저속 직진 가정으로
-        "최근 N회 스캔"을 맵으로 취급한다.
+        deque(maxlen=map_scans)는 항상 유지한다(폴백 + map_complete 판정).
+        추가로 오도메트리가 신뢰 가능하면(pose_conf >= min_pose_conf) 점유
+        격자(OccupancyMap)에 odom 정합 누적한다 — slot_found가 순간 스캔 대신
+        누적 맵을 쓰게 되어 한두 프레임 노이즈/가림에 강건해진다. 미보정
+        (conf=0)이면 격자를 아예 만들지 않아 기존 동작과 완전히 같다.
         """
         self.scans.append(scan)
+        pose = self._trusted_pose(sensors)
+        if pose is not None and np is not None:
+            if self.occ is None:
+                self.occ = OccupancyMap(size_m=self.p["occ_size_m"],
+                                        res_m=self.p["occ_res_m"],
+                                        min_hits=self.p["occ_min_hits"])
+            self.occ.add_scan(scan, pose, self.config.LIDAR_MOUNT,
+                              self.config.LIDAR_SELF_MASK_DEG)
+            self.debug["occupancy"] = self.occ
 
     def map_complete(self):
         """(1단계) 스캔이 map_scans회 쌓이면 맵 빌딩 완료."""
@@ -191,8 +209,16 @@ class TParkingMission(Mission):
         후방 0도 라이다의 측면 섹터(전방 기준 75~165도, side 방향)에서
         slot_max_lateral_m 이내 점만 취해 bearing 순으로 정렬, 이웃 점 사이
         chord 폭이 slot_gap_min_m 이상이면 두 주차 차량 사이 갭이다.
+
+        점유 격자가 있으면(오도메트리 보정 완료) 순간 스캔 대신 누적 맵을
+        현재 pose 기준 스캔으로 역변환(synthesize_scan)해 같은 chord 로직을
+        돌린다 — 노이즈/가림에 강건. 없으면 기존 순간 스캔 그대로.
         """
         scan = sensors.get("lidar_scan")
+        pose = self._trusted_pose(sensors)
+        if self.occ is not None and pose is not None:
+            scan = self.occ.synthesize_scan(
+                pose, self.p["slot_max_lateral_m"] * 2.0, self.config.LIDAR_MOUNT)
         if not scan:
             return False
         cfg = self.config

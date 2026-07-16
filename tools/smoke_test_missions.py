@@ -308,6 +308,7 @@ def test_t_parking():
         clk.advance(0.1)
         m.step(sensors(scan=any_scan), car)
     ok &= check("MAP_BUILD → FIND_SLOT (스캔 누적 완료)", m.state == "FIND_SLOT")
+    ok &= check("오도메트리 미보정(conf=0) → 점유격자 미생성 (deque 폴백)", m.occ is None)
 
     # 우측(side='R') 주차 차량 2대 + 사이 갭: bearing -120/-75 (원시 60/105), 1.0m
     slot_scan = [(15, 58, 1000), (15, 60, 1000), (15, 103, 1000), (15, 105, 1000)]
@@ -339,6 +340,33 @@ def test_t_parking():
     return ok
 
 
+def test_t_parking_occupancy():
+    """오도메트리 신뢰 가능 시 점유격자 경로: MAP_BUILD에서 격자가 만들어지고
+    FIND_SLOT이 순간 스캔 대신 누적 맵(synthesize_scan) 위에서 슬롯을 찾는다."""
+    print("== t_parking 점유격자 경로 (pose_conf 충족) ==")
+    ok = True
+    m, car, clk = TParkingMission(), FakeCar(), FakeClock()
+    m.on_start(car, config)
+    m._now = clk
+    p = T_PARKING
+
+    # 우측 주차 차량 2대(사이 chord ~0.73m >= slot_gap_min 0.6): 원시각 58~60/103~105도
+    slot_scan = [(15, 58, 1000), (15, 60, 1000), (15, 103, 1000), (15, 105, 1000)]
+    pose = (0.0, 0.0, 0.0)
+    for _ in range(p["map_scans"]):
+        clk.advance(0.1)
+        m.step(sensors(scan=slot_scan, pose=pose, pose_conf=0.9), car)
+    ok &= check("pose_conf 충족 → 점유격자 생성", m.occ is not None)
+    ok &= check("격자에 점유 셀 누적", len(m.occ.occupied_points()) > 0)
+    ok &= check("debug['occupancy'] 노출", m.debug.get("occupancy") is m.occ)
+
+    # FIND_SLOT: 순간 스캔 없이(scan=None) 누적 맵만으로 슬롯을 찾아야 한다
+    m.step(sensors(scan=None, pose=pose, pose_conf=0.9), car)
+    ok &= check("누적 맵만으로 슬롯 검출 → REVERSE_ALIGN", m.state == "REVERSE_ALIGN")
+    ok &= check("슬롯 위치 기록됨", m._slot is not None)
+    return ok
+
+
 def main():
     results = [
         test_white_discrimination(),
@@ -347,6 +375,7 @@ def main():
         test_road_lane_change(),
         test_lane_change_distance_mode(),
         test_t_parking(),
+        test_t_parking_occupancy(),
     ]
     passed = all(results)
     print("\n결과:", "이상 없음" if passed else "위 [X] 항목 확인 필요")
