@@ -15,12 +15,9 @@ CAMERA_SPLIT = True      # False면 mission_node가 top/bottom 양쪽에 원본 
 FRAME_WIDTH = 640        # 캡처 요청 해상도 — 센서 네이티브(랜드스케이프) 기준, 회전 전
 FRAME_HEIGHT = 480
 
-# 전방 카메라는 세로(portrait)로 물리 마운트 — 상/하 스플릿의 수직 화각을
-# 넓히기 위함(av_car 시뮬 모델 기준 vFOV 49°→78°, 아래 VEHICLE 참고 참조).
-# C920은 하드웨어 회전을 지원하지 않으므로 캡처 직후 소프트웨어로 90도 보정
-# 한다. 실제 마운트 방향(시계/반시계)에 따라 "CW"/"CCW"로 뒤집을 것 — 실차에서
-# 좌우가 반전되면 이 값부터 확인.
-FRONT_CAMERA_ROTATE = "CW"  # None | "CW" | "CCW" | "180"
+# 전방 카메라는 파노라믹(가로/landscape)으로 물리 마운트 — 세로(portrait) 마운트는
+# 폐기(2026-07-16). 회전 보정 불필요.
+FRONT_CAMERA_ROTATE = None  # None | "CW" | "CCW" | "180"
 
 LOOP_HZ = 30             # 메인 제어 루프 주기
 
@@ -61,7 +58,7 @@ TRACK_WIDTH_M = 0.430
 WHEEL_RADIUS_M = 0.10
 STEERING_LIMIT_DEG = 20
 FRONT_CAMERA_SENSOR_HFOV_DEG = 78   # Logitech C920 spec (센서 자체, landscape 기준)
-FRONT_CAMERA_MOUNT_VFOV_DEG = 78    # portrait 마운트 후 실효 수직화각 (sim 기준, hfov<->vfov 교환)
+FRONT_CAMERA_MOUNT_VFOV_DEG = 49    # 파노라믹(landscape) 마운트 실효 수직화각 (sim 기준 vFOV)
 
 # ---- odometry_node 지면 투영 외부 파라미터 (미측정). model.sdf에 카메라 z가
 # 0.47(계산치)/0.795(실측치, 규정 75cm 마운트 상한 초과로 플래그됨) 두 값으로
