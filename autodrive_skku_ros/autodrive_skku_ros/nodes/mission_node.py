@@ -20,10 +20,20 @@ try:
 except ImportError:
     cv2 = None
 
-from .. import config, tuning
+from .. import config, debug_viz, tuning
 from ..missions import MISSIONS
 from .arduino_node import STATE_UNKNOWN
 from .lidar_node import laserscan_msg_to_tuples
+
+# Mission.debug 키 → (원본 프레임 슬롯, 그리기 함수). 오버레이 타이머가 이 표에
+# 있는 키만 /debug/<키> CompressedImage로 발행한다 (없는 키는 무시).
+OVERLAY_DRAWERS = {
+    "lane_poi": ("bottom", debug_viz.draw_lane_poi),
+    "obstacle": ("bottom", debug_viz.draw_obstacle),
+    "stop_line": ("bottom", debug_viz.draw_stop_line),
+    "traffic_light": ("top", debug_viz.draw_traffic_light),
+    "parking_line": ("rear", debug_viz.draw_parking_line),
+}
 
 MISSION_DESC = {
     "road": "도로 주행 — 차선 인식/차선 변경/장애물 회피",
@@ -158,6 +168,16 @@ class MissionNode(Node):
 
         self.create_timer(1.0 / config.LOOP_HZ, self._tick)
 
+        # 디버그 오버레이 — 감지기 분석(Mission.debug)을 프레임에 그려
+        # /debug/*(CompressedImage)로 발행한다 (Foxglove 실차 튜닝용).
+        # debug.overlay는 ros2 param set으로 라이브 on/off 가능. overlay_hz는
+        # 타이머 생성 시점 값으로 고정(런타임 변경은 재기동 필요).
+        self.declare_parameter("debug.overlay", True)
+        self.declare_parameter("debug.overlay_hz", 5.0)
+        self._overlay_pubs = {}
+        overlay_hz = max(float(self.get_parameter("debug.overlay_hz").value), 0.1)
+        self.create_timer(1.0 / overlay_hz, self._publish_overlays)
+
     def _make_image_cb(self, slot):
         def _cb(msg):
             if cv2 is None:
@@ -198,6 +218,39 @@ class MissionNode(Node):
         self._mission.step(sensors, self._car)
         if self._show and not show_frames(top, bottom, self._back):
             self._show = False
+
+    def _publish_overlays(self):
+        """Mission.debug 스크래치를 debug_viz로 그려 /debug/*에 발행한다.
+        미션 tick과 다른 프레임이 쓰일 수 있지만(최대 1 오버레이 주기 차이)
+        튜닝 확인용으로는 충분하다. 실패해도 미션 루프에는 영향 없음."""
+        if cv2 is None or not self.get_parameter("debug.overlay").value:
+            return
+        top, bottom = self._split_front()
+        frames = {"top": top, "bottom": bottom, "rear": self._back}
+        for key, dbg in list(self._mission.debug.items()):
+            entry = OVERLAY_DRAWERS.get(key)
+            if entry is None:
+                continue
+            frame = frames.get(entry[0])
+            if frame is None:
+                continue
+            try:
+                vis = entry[1](frame, dbg)
+                ok, buf = cv2.imencode(".jpg", vis, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+                if not ok:
+                    continue
+                pub = self._overlay_pubs.get(key)
+                if pub is None:  # 데이터가 실제로 생긴 토픽만 lazy 생성
+                    pub = self.create_publisher(CompressedImage, f"/debug/{key}", 1)
+                    self._overlay_pubs[key] = pub
+                msg = CompressedImage()
+                msg.header.stamp = self.get_clock().now().to_msg()
+                msg.format = "jpeg"
+                msg.data = buf.tobytes()
+                pub.publish(msg)
+            except Exception as e:
+                self.get_logger().warning(f"오버레이({key}) 발행 실패: {e}",
+                                          throttle_duration_sec=5.0)
 
     def destroy_node(self):
         self._mission.on_stop(self._car)

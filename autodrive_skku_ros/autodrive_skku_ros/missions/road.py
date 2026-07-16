@@ -40,13 +40,16 @@ LANE_CHANGE = dict(
 )
 
 
-def detect_obstacle_ahead(frame, cam_cfg):
+def detect_obstacle_ahead(frame, cam_cfg, debug=None):
     """bottom 프레임 중앙 ROI에서 흰색 장애물 차량 블롭 감지. True/False.
 
     대회 규격상 장애물 차량·정지선·차선이 전부 흰색이라 색이 아닌 "형태"로
     구분한다: 차선은 가늘고(폭 작음) 세로로 길며, 정지선은 가로로 얇은 밴드
     (높이 작음), 장애물 차량은 폭·높이가 모두 크고 bbox를 촘촘히 채우는
     블롭이다. 대각선으로 걸친 차선은 bbox가 커도 채움비(min_fill)에서 탈락.
+
+    debug: dict를 넘기면 ROI 사각형/블롭 목록(합격 여부 포함)/판정을 채운다
+    (debug_viz.draw_obstacle 오버레이용). 반환값/판정 로직은 불변.
     """
     if cv2 is None or frame is None:
         return False
@@ -60,16 +63,21 @@ def detect_obstacle_ahead(frame, cam_cfg):
         mask = cv2.inRange(hsv, (0, 0, v_min), (179, s_max, 255))
         rh, rw = mask.shape[:2]
         num, _labels, stats, _cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
+        found = False
+        blobs = []  # (x, y, w, h, 합격 여부) — 프레임 절대좌표
         for i in range(1, num):
-            _bx, _by, bw, bh, area = stats[i]
-            if bw < cam_cfg["min_w_ratio"] * rw or bh < cam_cfg["min_h_ratio"] * rh:
-                continue  # 가늘거나(차선) 낮음(정지선)
-            if area < cam_cfg["min_area_ratio"] * rh * rw:
-                continue
-            if area / float(bw * bh) < cam_cfg["min_fill"]:
-                continue  # bbox가 희박 — 대각선 차선
-            return True
-        return False
+            bx, by, bw, bh, area = stats[i]
+            passed = not (bw < cam_cfg["min_w_ratio"] * rw or bh < cam_cfg["min_h_ratio"] * rh
+                          or area < cam_cfg["min_area_ratio"] * rh * rw
+                          or area / float(bw * bh) < cam_cfg["min_fill"])
+            blobs.append((int(bx + x0), int(by + y0), int(bw), int(bh), passed))
+            if passed:
+                found = True
+                if debug is None:
+                    return True  # 오버레이 불필요 시 기존처럼 조기 종료
+        if debug is not None:
+            debug.update(roi=(x0, y0, x1, y1), blobs=blobs, result=found)
+        return found
     except Exception as e:
         print(f"[road] 장애물 감지 실패, 이번 프레임 스킵: {e}")
         return False
@@ -93,6 +101,7 @@ class RoadMission(Mission):
 
     def on_start(self, car, config):
         self.config = config
+        self.debug = {}
         self._lane_tracker = LaneCenterTracker()
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self._lc_phase = None       # None이면 기동 중 아님
@@ -113,15 +122,19 @@ class RoadMission(Mission):
             return
 
         # (4) 카메라로 전방 흰색 장애물 감지 → 라이다 측면 여유로 방향 결정
+        obs_dbg = {}
         if now >= self._cooldown_until and \
-                detect_obstacle_ahead(sensors.get("bottom"), OBSTACLE_CAM):
+                detect_obstacle_ahead(sensors.get("bottom"), OBSTACLE_CAM, debug=obs_dbg):
+            self.debug["obstacle"] = obs_dbg
             self.lane_change(car, self.pick_avoid_direction(sensors.get("lidar_scan")))
             self._lane_change_tick(car, now)
             return
+        self.debug["obstacle"] = obs_dbg
 
         # (2) 차선 인식 주행 — POI 사다리꼴 다단 밴드 우측차선 추종 (2026-07-16 적용,
         # 기존 vendor edge_detection은 traffic.py에서 계속 씀)
-        follow_lane_poi(self._lane_tracker, car, sensors.get("bottom"), LANE_POI)
+        self.debug["lane_poi"] = follow_lane_poi(
+            self._lane_tracker, car, sensors.get("bottom"), LANE_POI)
 
     def pick_avoid_direction(self, scan):
         """라이다 측면 여유 비교로 회피 방향 결정. 반사 없음(None)=완전히 빈 쪽."""

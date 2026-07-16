@@ -42,11 +42,14 @@ STOP_LINE = dict(
 )
 
 
-def detect_light_color(frame, min_ratio=0.005):
+def detect_light_color(frame, min_ratio=0.005, debug=None):
     """상단 프레임에서 빨강/초록 픽셀 비율로 신호등 판정. 'red'/'green'/None.
 
     검증된 HUE_THRESHOLD/SATURATION 값을 그대로 사용한다. 디스플레이가 있는
     환경에서는 fl.libCAMERA().object_detection(원 검출 방식)으로 교체 가능.
+
+    debug: dict를 넘기면 픽셀 카운트/임계/판정을 채운다
+    (debug_viz.draw_traffic_light 오버레이용). 반환값/판정 로직은 불변.
     """
     if cv2 is None or frame is None:
         return None
@@ -60,10 +63,15 @@ def detect_light_color(frame, min_ratio=0.005):
 
     min_pixels = frame.shape[0] * frame.shape[1] * min_ratio
     if red >= min_pixels and red > green * 2:
-        return "red"
-    if green >= min_pixels and green > red * 2:
-        return "green"
-    return None
+        result = "red"
+    elif green >= min_pixels and green > red * 2:
+        result = "green"
+    else:
+        result = None
+    if debug is not None:
+        debug.update(red=int(red), green=int(green),
+                     min_pixels=int(min_pixels), result=result)
+    return result
 
 
 class TrafficMission(Mission):
@@ -91,6 +99,7 @@ class TrafficMission(Mission):
         assert set(LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
             f"LANE_EDGE 키가 예상과 다름: {set(LANE_EDGE)}"
         self.config = config
+        self.debug = {}
         self.env = fl.libCAMERA() if fl is not None else None
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self.wait = None            # None | "line" | "red"
@@ -101,7 +110,10 @@ class TrafficMission(Mission):
 
     def step(self, sensors, car):
         now = self._now()
-        color = detect_light_color(sensors.get("top"), TRAFFIC_PIXEL_RATIO)
+        light_dbg = {}
+        color = detect_light_color(sensors.get("top"), TRAFFIC_PIXEL_RATIO,
+                                   debug=light_dbg)
+        self.debug["traffic_light"] = light_dbg
 
         if color == "red" and self.wait != "red":
             self.wait = "red"
@@ -117,7 +129,10 @@ class TrafficMission(Mission):
                 self._resume(car, now)
             return
 
-        if now >= self.cooldown_until and self.stop_line_detected(sensors.get("bottom")):
+        stop_dbg = {}
+        stop_hit = self.stop_line_detected(sensors.get("bottom"), debug=stop_dbg)
+        self.debug["stop_line"] = stop_dbg
+        if now >= self.cooldown_until and stop_hit:
             self.wait = "line"
             self.wait_t0 = now
             car.drive(0)
@@ -131,12 +146,15 @@ class TrafficMission(Mission):
         self.cooldown_until = now + STOP_LINE["cooldown_s"]
         car.drive(self.config.DRIVE_SPEED)
 
-    def stop_line_detected(self, bottom_frame):
+    def stop_line_detected(self, bottom_frame, debug=None):
         """(1단계) 하단 ROI에서 가로로 긴 흰색 밴드 검출.
 
         흰색(저채도·고명도) 마스크 → 행별 흰 픽셀 비율 → row_fill 이상인
         행이 min_rows 연속이면 정지선. 세로 차선은 행 채움비가 낮고,
         횡단보도(진행방향 줄무늬)는 폭 점유가 ~60%라 row_fill 0.7을 못 넘는다.
+
+        debug: dict를 넘기면 행 채움비/ROI/판정을 채운다
+        (debug_viz.draw_stop_line 오버레이용). 반환값/판정 로직은 불변.
         """
         if cv2 is None or bottom_frame is None:
             return False
@@ -144,16 +162,25 @@ class TrafficMission(Mission):
             sl = STOP_LINE
             s_max, v_min = _config.white_hsv(sl)
             h, w = bottom_frame.shape[:2]
-            roi = bottom_frame[int(h * sl["roi_top"]):, :]
+            roi_y0 = int(h * sl["roi_top"])
+            roi = bottom_frame[roi_y0:, :]
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, (0, 0, v_min), (179, s_max, 255))
             row_frac = mask.sum(axis=1) / (255.0 * w)
+            found = False
             run = 0
             for f in row_frac:
                 run = run + 1 if f >= sl["row_fill"] else 0
                 if run >= sl["min_rows"]:
-                    return True
-            return False
+                    found = True
+                    if debug is None:
+                        return True  # 오버레이 불필요 시 기존처럼 조기 종료
+                    break
+            if debug is not None:
+                debug.update(roi_y0=roi_y0, row_frac=row_frac,
+                             row_fill=sl["row_fill"], min_rows=sl["min_rows"],
+                             result=found)
+            return found
         except Exception as e:
             print(f"[traffic] 정지선 감지 실패, 이번 프레임 스킵: {e}")
             return False

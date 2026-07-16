@@ -94,6 +94,12 @@ def _run_tuning():
                 m.test_type_roundtrip()])
 
 
+def _run_debug_viz():
+    m = _load("smoke_test_debug_viz")
+    return all([m.test_lane_poi_analysis(), m.test_debug_out_dicts(),
+                m.test_draw_functions()])
+
+
 MODULES = {
     "env": ("환경/하드웨어 점검 (패키지·카메라·시리얼)", _run_env),
     "lidar": ("라이다 후방 장착 지오메트리 + ROS LaserScan 변환 순수 함수", _run_lidar),
@@ -104,6 +110,7 @@ MODULES = {
     "road": ("road 미션 장애물 회피 차선 변경", _run_road),
     "parking": ("t_parking 미션 상태머신 end-to-end", _run_parking),
     "tuning": ("ROS 파라미터 ↔ 튜닝 dict 바인딩 (flatten/apply, in-place 검증)", _run_tuning),
+    "debug_viz": ("디버그 오버레이 드로잉 + 감지기 debug out-dict (headless)", _run_debug_viz),
 }
 
 

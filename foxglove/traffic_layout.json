@@ -1,0 +1,50 @@
+{
+  "configById": {
+    "Image!stop_line": {
+      "cameraTopic": "/debug/stop_line",
+      "mode": "fit",
+      "synchronize": false
+    },
+    "Image!traffic_light": {
+      "cameraTopic": "/debug/traffic_light",
+      "mode": "fit",
+      "synchronize": false
+    },
+    "Image!front": {
+      "cameraTopic": "/camera/front",
+      "mode": "fit",
+      "synchronize": false
+    },
+    "RawMessages!state": {
+      "topicPath": "/car/state"
+    }
+  },
+  "layout": {
+    "direction": "column",
+    "first": {
+      "direction": "row",
+      "first": "Image!traffic_light",
+      "second": "Image!stop_line",
+      "splitPercentage": 50
+    },
+    "second": {
+      "direction": "row",
+      "first": "Image!front",
+      "second": "RawMessages!state",
+      "splitPercentage": 60
+    },
+    "splitPercentage": 60
+  },
+  "panelTitleById": {
+    "Image!traffic_light": "debug/traffic_light (빨강/초록 픽셀비 판정)",
+    "Image!stop_line": "debug/stop_line (행 채움비 바그래프)",
+    "Image!front": "camera/front (원본 전방)",
+    "RawMessages!state": "car/state (0 정지 / 1 전진 / 2 후진)"
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "linkedGlobalVariables": [],
+  "playbackConfig": {
+    "speed": 1
+  }
+}

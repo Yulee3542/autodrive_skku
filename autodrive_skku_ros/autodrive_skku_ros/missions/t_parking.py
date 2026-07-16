@@ -57,6 +57,7 @@ class TParkingMission(Mission):
 
     def on_start(self, car, config):
         self.config = config
+        self.debug = {}
         self.p = T_PARKING
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self.state = "MAP_BUILD"
@@ -87,7 +88,8 @@ class TParkingMission(Mission):
 
         elif self.state == "REVERSE_ALIGN":
             car.drive(-self.config.SLOW_SPEED)
-            steer = self.reverse_lane_steer(sensors.get("rear"))
+            steer = self.reverse_lane_steer(sensors.get("rear"),
+                                            debug=self.debug.setdefault("parking_line", {}))
             if steer is not None:
                 car.steer(steer)
             if self.aligned(sensors):
@@ -139,7 +141,8 @@ class TParkingMission(Mission):
 
         elif self._park_phase == "CREEP":
             car.drive(-self.config.SLOW_SPEED)
-            steer = self.reverse_lane_steer(sensors.get("rear"))
+            steer = self.reverse_lane_steer(sensors.get("rear"),
+                                            debug=self.debug.setdefault("parking_line", {}))
             if steer is not None:
                 car.steer(steer)
             if self.parked(sensors) or in_phase >= self.p["park_max_s"]:
@@ -192,13 +195,16 @@ class TParkingMission(Mission):
                 return True
         return False
 
-    def reverse_lane_steer(self, rear_frame):
+    def reverse_lane_steer(self, rear_frame, debug=None):
         """(2,3단계) 후방 카메라 주차선 인식 → 'F'/'L'/'R'. 실패 시 None.
 
         하단 절반 ROI에서 흰색(STOP_LINE과 같은 임계) 컬럼 히스토그램을 만들어
         주차선 2줄의 컬럼 클러스터를 찾고, 두 줄 중점과 화면 중앙의 오차로
         조향을 정한다. "후진" 시 차체 뒤가 조향 반대쪽으로 돌아가므로
         전진 기준 방향을 구한 뒤 L↔R을 반전해 반환한다.
+
+        debug: dict를 넘기면 클러스터/중점/오차/판정을 채운다
+        (debug_viz.draw_parking_line 오버레이용). 반환값/판정 로직은 불변.
         """
         if cv2 is None or rear_frame is None:
             return None
@@ -209,6 +215,9 @@ class TParkingMission(Mission):
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             mask = cv2.inRange(hsv, (0, 0, v_min), (179, s_max, 255))
             col_sum = mask.sum(axis=0).astype(float)
+            if debug is not None:
+                debug.update(roi_y0=h // 2, tol=self.p["align_tol_px"],
+                             clusters=[], mid=None, err=None, steer=None)
             if col_sum.max() <= 0:
                 self._last_err_px = None
                 return None
@@ -223,6 +232,8 @@ class TParkingMission(Mission):
                     start = c
                 prev = c
             clusters.append((start + prev) / 2.0)
+            if debug is not None:
+                debug["clusters"] = clusters
             if len(clusters) < 2:
                 self._last_err_px = None
                 return None  # 주차선 2줄이 다 보여야 정렬 가능
@@ -230,9 +241,13 @@ class TParkingMission(Mission):
             err = mid - w / 2.0
             self._last_err_px = err
             if abs(err) <= self.p["align_tol_px"]:
-                return "F"
-            forward = "R" if err > 0 else "L"          # 전진 기준 목표 방향
-            return "L" if forward == "R" else "R"       # 후진 조향 반전
+                steer = "F"
+            else:
+                forward = "R" if err > 0 else "L"          # 전진 기준 목표 방향
+                steer = "L" if forward == "R" else "R"      # 후진 조향 반전
+            if debug is not None:
+                debug.update(mid=mid, err=err, steer=steer)
+            return steer
         except Exception as e:
             print(f"[t_parking] 주차선 인식 실패, 이번 프레임 스킵: {e}")
             self._last_err_px = None

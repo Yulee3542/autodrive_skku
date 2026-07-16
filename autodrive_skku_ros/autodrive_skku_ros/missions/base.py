@@ -27,6 +27,12 @@ class Mission:
 
     name = "base"
 
+    # 틱마다 감지기 분석 결과를 담는 스크래치 — mission_node의 오버레이 타이머가
+    # 읽어 /debug/* 이미지 토픽으로 발행한다 (debug_viz.py 참고). 미션 로직은
+    # 여기 값을 읽지 않는다(진단 전용). 각 미션 on_start()에서 self.debug = {}로
+    # 인스턴스 사본을 만든다.
+    debug = {}
+
     def on_start(self, car, config):
         pass
 

@@ -1,12 +1,17 @@
 {
   "configById": {
-    "Image!front": {
-      "cameraTopic": "/camera/front",
+    "Image!lane_poi": {
+      "cameraTopic": "/debug/lane_poi",
       "mode": "fit",
       "synchronize": false
     },
-    "Image!back": {
-      "cameraTopic": "/camera/back",
+    "Image!obstacle": {
+      "cameraTopic": "/debug/obstacle",
+      "mode": "fit",
+      "synchronize": false
+    },
+    "Image!front": {
+      "cameraTopic": "/camera/front",
       "mode": "fit",
       "synchronize": false
     },
@@ -19,21 +24,27 @@
     "direction": "column",
     "first": {
       "direction": "row",
-      "first": "Image!front",
-      "second": "Image!back",
+      "first": "Image!lane_poi",
+      "second": "Image!obstacle",
       "splitPercentage": 50
     },
     "second": {
       "direction": "row",
-      "first": "3D!lidar",
-      "second": "RawMessages!pose",
-      "splitPercentage": 50
+      "first": "Image!front",
+      "second": {
+        "direction": "row",
+        "first": "3D!lidar",
+        "second": "RawMessages!pose",
+        "splitPercentage": 50
+      },
+      "splitPercentage": 34
     },
     "splitPercentage": 60
   },
   "panelTitleById": {
-    "Image!front": "camera/front (전방, 신호등+차선 통짜)",
-    "Image!back": "camera/back (후방)",
+    "Image!lane_poi": "debug/lane_poi (밴드/클러스터/조향 목표 오버레이)",
+    "Image!obstacle": "debug/obstacle (장애물 블롭 판정 오버레이)",
+    "Image!front": "camera/front (원본 전방)",
     "3D!lidar": "lidar (→ /scan)",
     "RawMessages!pose": "car/pose (상대 오도메트리 — 미보정 시 confidence=0)"
   },

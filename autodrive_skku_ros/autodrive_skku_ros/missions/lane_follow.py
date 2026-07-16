@@ -151,40 +151,45 @@ class LaneCenterTracker:
         self.smoothed = None
 
 
-def follow_lane_poi(tracker, car, frame, config=LANE_POI):
-    """POI 사다리꼴 다단 밴드로 우측 차선 중심을 추종해 조향.
+def analyze_lane_poi(frame, config=LANE_POI):
+    """POI 사다리꼴 다단 밴드 분석 — 조향 없이 밴드/클러스터/목표점만 계산한다.
+    follow_lane_poi(조향)와 debug_viz.draw_lane_poi(오버레이)가 공유하는 순수 분석.
 
-    follow_lane()과 동일한 안전 계약: 프레임 예외/미검출 시 steer를 호출하지
-    않고 이전 조향을 유지한다(실패를 "F"로 강제 리셋하면 그 자체가 실제
-    조향 액추에이션이라 더 위험함).
+    반환 details dict (frame 없음/cv2 미설치면 None):
+      cx, w, h        : 프레임 중앙/크기
+      bands           : [dict(y0, y1, x_lo, x_hi, clusters, target)] — 밴드 0=가장 가까움.
+                        clusters는 (중심컬럼, 질량, 좌끝, 우끝) 절대좌표 목록.
+      path_points     : [(y_mid, target_col)] 가까운 순 정렬
+      raw_target      : 거리 가중 평균 목표 컬럼 (검출 실패 시 None)
     """
     if frame is None or cv2 is None or np is None:
-        return
-    try:
-        h, w = frame.shape[:2]
-        cx = w / 2.0
-        n_bands = config["n_bands"]
-        path_points = []
-        for i in range(n_bands):
-            y0, y1 = _poi_band_rows(h, config["roi_frac"], n_bands, i)
-            x_lo, x_hi = _poi_band_x_range(
-                w, cx, n_bands, i,
-                config["trapezoid_near_half_frac"], config["trapezoid_far_half_frac"])
-            band = frame[y0:y1, x_lo:x_hi]
-            gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
-            _, binary = cv2.threshold(gray, config["white_thresh"], 255, cv2.THRESH_BINARY)
-            clusters = _poi_find_clusters(
-                binary, config["cluster_gap_px"], config["min_cluster_mass"],
-                config["max_cluster_width_px"], config["min_row_span_frac"])
-            clusters = [(c + x_lo, m, lo + x_lo, hi + x_lo) for (c, m, lo, hi) in clusters]
-            target = _poi_pick_right_lane_center(clusters)
-            if target is not None:
-                path_points.append(((y0 + y1) // 2, target))
+        return None
+    h, w = frame.shape[:2]
+    cx = w / 2.0
+    n_bands = config["n_bands"]
+    bands = []
+    path_points = []
+    for i in range(n_bands):
+        y0, y1 = _poi_band_rows(h, config["roi_frac"], n_bands, i)
+        x_lo, x_hi = _poi_band_x_range(
+            w, cx, n_bands, i,
+            config["trapezoid_near_half_frac"], config["trapezoid_far_half_frac"])
+        band = frame[y0:y1, x_lo:x_hi]
+        gray = cv2.cvtColor(band, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, config["white_thresh"], 255, cv2.THRESH_BINARY)
+        clusters = _poi_find_clusters(
+            binary, config["cluster_gap_px"], config["min_cluster_mass"],
+            config["max_cluster_width_px"], config["min_row_span_frac"])
+        clusters = [(c + x_lo, m, lo + x_lo, hi + x_lo) for (c, m, lo, hi) in clusters]
+        target = _poi_pick_right_lane_center(clusters)
+        bands.append(dict(y0=y0, y1=y1, x_lo=x_lo, x_hi=x_hi,
+                          clusters=clusters, target=target))
+        if target is not None:
+            path_points.append(((y0 + y1) // 2, target))
 
-        if not path_points:
-            return  # 이전 조향 유지
-
-        path_points.sort(key=lambda p: -p[0])  # 가까운(아래) -> 먼(위) 순
+    path_points.sort(key=lambda p: -p[0])  # 가까운(아래) -> 먼(위) 순
+    raw_target = None
+    if path_points:
         weights_sum = 0.0
         weighted = 0.0
         for rank, (_y, col) in enumerate(path_points):
@@ -193,17 +198,46 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI):
             weights_sum += weight
         raw_target = weighted / weights_sum
 
-        alpha = config["smoothing_alpha"]
-        tracker.smoothed = raw_target if tracker.smoothed is None else (
-            (1 - alpha) * tracker.smoothed + alpha * raw_target)
+    return dict(cx=cx, w=w, h=h, bands=bands,
+                path_points=path_points, raw_target=raw_target)
 
-        offset = tracker.smoothed - cx
+
+def follow_lane_poi(tracker, car, frame, config=LANE_POI):
+    """POI 사다리꼴 다단 밴드로 우측 차선 중심을 추종해 조향.
+
+    follow_lane()과 동일한 안전 계약: 프레임 예외/미검출 시 steer를 호출하지
+    않고 이전 조향을 유지한다(실패를 "F"로 강제 리셋하면 그 자체가 실제
+    조향 액추에이션이라 더 위험함).
+
+    반환: analyze_lane_poi details에 smoothed/offset/direction을 더한 dict —
+    디버그 오버레이용. 분석 자체가 불가하면 None. 기존 호출부는 반환값을
+    무시해도 동작이 같다.
+    """
+    try:
+        details = analyze_lane_poi(frame, config)
+        if details is None:
+            return None
+        details.update(smoothed=tracker.smoothed, offset=None, direction=None,
+                       deadzone=config["center_deadzone_px"],
+                       roi_frac=config["roi_frac"])
+        if details["raw_target"] is None:
+            return details  # 이전 조향 유지 (smoothed는 직전 값 그대로)
+
+        alpha = config["smoothing_alpha"]
+        tracker.smoothed = details["raw_target"] if tracker.smoothed is None else (
+            (1 - alpha) * tracker.smoothed + alpha * details["raw_target"])
+
+        offset = tracker.smoothed - details["cx"]
         deadzone = config["center_deadzone_px"]
         if offset > deadzone:
-            car.steer("R")
+            direction = "R"
         elif offset < -deadzone:
-            car.steer("L")
+            direction = "L"
         else:
-            car.steer("F")
+            direction = "F"
+        car.steer(direction)
+        details.update(smoothed=tracker.smoothed, offset=offset, direction=direction)
+        return details
     except Exception as e:
         print(f"[lane_follow] follow_lane_poi 실패, 이번 프레임 스킵: {e}")
+        return None
