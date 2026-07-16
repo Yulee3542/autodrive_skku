@@ -6,13 +6,8 @@ except ImportError:
     cv2 = None
 
 from .base import Mission
-from .lane_follow import follow_lane, LANE_EDGE
+from .lane_follow import LaneCenterTracker, follow_lane_poi, LANE_POI
 from ..nodes.lidar_node import side_clearance_m
-
-try:
-    from ..vendor import Function_Library as fl
-except ImportError:  # 패키지 미설치 개발 환경 — 차선 인식 없이 골격만 동작
-    fl = None
 
 
 # ---------------- 튜닝 파라미터 ----------------
@@ -95,10 +90,8 @@ class RoadMission(Mission):
     name = "road"
 
     def on_start(self, car, config):
-        assert set(LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
-            f"LANE_EDGE 키가 예상과 다름: {set(LANE_EDGE)}"
         self.config = config
-        self.env = fl.libCAMERA() if fl is not None else None
+        self._lane_tracker = LaneCenterTracker()
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self._lc_phase = None       # None이면 기동 중 아님
         self._lc_dir = "L"
@@ -124,8 +117,9 @@ class RoadMission(Mission):
             self._lane_change_tick(car, now)
             return
 
-        # (2) 차선 인식 주행 — 검증된 파라미터는 LANE_EDGE
-        follow_lane(self.env, car, sensors.get("bottom"), LANE_EDGE)
+        # (2) 차선 인식 주행 — POI 사다리꼴 다단 밴드 우측차선 추종 (2026-07-16 적용,
+        # 기존 vendor edge_detection은 traffic.py에서 계속 씀)
+        follow_lane_poi(self._lane_tracker, car, sensors.get("bottom"), LANE_POI)
 
     def pick_avoid_direction(self, scan):
         """라이다 측면 여유 비교로 회피 방향 결정. 반사 없음(None)=완전히 빈 쪽."""
