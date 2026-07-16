@@ -81,7 +81,8 @@ def _run_traffic():
 
 
 def _run_road():
-    return _load("smoke_test_missions").test_road_lane_change()
+    m = _load("smoke_test_missions")
+    return all([m.test_road_lane_change(), m.test_lane_change_distance_mode()])
 
 
 def _run_parking():

@@ -5,7 +5,7 @@ try:
 except ImportError:
     cv2 = None
 
-from .base import Mission
+from .base import Mission, traveled_m
 from .lane_follow import LaneCenterTracker, follow_lane_poi, LANE_POI
 from .. import config as _config
 from ..nodes.lidar_node import side_clearance_m
@@ -37,6 +37,13 @@ LANE_CHANGE = dict(
     straight_s=0.8,    # 직진 안정화 구간
     speed=80,          # 기동 중 속도
     cooldown_s=2.0,    # 기동 후 재트리거 억제 시간
+    # 오도메트리 기반 거리 조건 (선택): out_m/back_m을 설정하면 pose_conf가
+    # min_pose_conf 이상일 때 해당 구간을 "이동 거리 도달"로도 끝낼 수 있다 —
+    # 속도/배터리 변화에 덜 민감. 타이밍(out_s/back_s)은 항상 안전 상한으로
+    # 남는다. None(기본)이면 순수 타이밍 동작 = 기존과 완전히 동일.
+    out_m=None,
+    back_m=None,
+    min_pose_conf=0.3,
 )
 
 
@@ -118,7 +125,7 @@ class RoadMission(Mission):
 
         # (3) 차선 변경 기동 중이면 페이즈 머신만 진행
         if self._lc_phase is not None:
-            self._lane_change_tick(car, now)
+            self._lane_change_tick(sensors, car, now)
             return
 
         # (4) 카메라로 전방 흰색 장애물 감지 → 라이다 측면 여유로 방향 결정
@@ -127,7 +134,7 @@ class RoadMission(Mission):
                 detect_obstacle_ahead(sensors.get("bottom"), OBSTACLE_CAM, debug=obs_dbg):
             self.debug["obstacle"] = obs_dbg
             self.lane_change(car, self.pick_avoid_direction(sensors.get("lidar_scan")))
-            self._lane_change_tick(car, now)
+            self._lane_change_tick(sensors, car, now)
             return
         self.debug["obstacle"] = obs_dbg
 
@@ -164,6 +171,7 @@ class RoadMission(Mission):
         self._lc_t0 = self._now()
         self._lc_pulses = 0
         self._lc_last_pulse = 0.0
+        self._lc_pose0 = None  # 페이즈 시작 pose — 첫 틱에 신뢰 가능하면 기록
         car.drive(lc["speed"])
 
     def _lc_enter(self, phase, now):
@@ -171,6 +179,7 @@ class RoadMission(Mission):
         self._lc_t0 = now
         self._lc_pulses = 0
         self._lc_last_pulse = 0.0
+        self._lc_pose0 = None
 
     def _lc_pulse(self, car, direction, target, now):
         if self._lc_pulses < target and \
@@ -179,19 +188,37 @@ class RoadMission(Mission):
             self._lc_pulses += 1
             self._lc_last_pulse = now
 
-    def _lane_change_tick(self, car, now):
+    def _lc_phase_done(self, in_phase, dist_key, time_key, sensors, lc):
+        """페이즈 종료 판정: 타이밍(항상 상한) OR 오도메트리 거리 도달.
+        거리 조건은 dist_key가 설정돼 있고 pose_conf가 임계 이상일 때만 —
+        conf=0(미보정)이면 정확히 기존 타이밍 동작이다(fail-inert)."""
+        if in_phase >= lc[time_key]:
+            return True
+        dist_target = lc.get(dist_key)
+        if dist_target and sensors.get("pose_conf", 0.0) >= lc["min_pose_conf"]:
+            d = traveled_m(self._lc_pose0, sensors.get("pose"))
+            if d is not None and d >= dist_target:
+                return True
+        return False
+
+    def _lane_change_tick(self, sensors, car, now):
         lc = LANE_CHANGE
         opposite = "R" if self._lc_dir == "L" else "L"
         in_phase = now - self._lc_t0
 
+        # 페이즈 시작 기준 pose — 신뢰 가능해진 첫 틱에 기록
+        if self._lc_pose0 is None and sensors.get("pose") is not None and \
+                sensors.get("pose_conf", 0.0) >= lc["min_pose_conf"]:
+            self._lc_pose0 = sensors["pose"]
+
         if self._lc_phase == "OUT":
             self._lc_pulse(car, self._lc_dir, lc["pulses"], now)
-            if in_phase >= lc["out_s"]:
+            if self._lc_phase_done(in_phase, "out_m", "out_s", sensors, lc):
                 self._lc_enter("BACK", now)
         elif self._lc_phase == "BACK":
             # 2배 펄스: 진입 조향을 지나 반대 lock까지 스윙해 차선에 맞춘다
             self._lc_pulse(car, opposite, 2 * lc["pulses"], now)
-            if in_phase >= lc["back_s"]:
+            if self._lc_phase_done(in_phase, "back_m", "back_s", sensors, lc):
                 self._lc_enter("STRAIGHT", now)
         elif self._lc_phase == "STRAIGHT":
             self._lc_pulse(car, self._lc_dir, lc["pulses"], now)

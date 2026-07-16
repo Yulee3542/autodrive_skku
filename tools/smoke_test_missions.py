@@ -74,9 +74,12 @@ class FakeClock:
         self.t += dt
 
 
-def sensors(top=None, bottom=None, rear=None, scan=None):
+def sensors(top=None, bottom=None, rear=None, scan=None, pose=None, pose_conf=0.0):
+    # pose=None/pose_conf=0.0 기본값 = 오도메트리 미보정 상태 — 기존 테스트가
+    # 이 기본값으로 전부 통과해야 fail-inert(오도메트리 없이는 동작 불변)가 증명된다.
     return {"top": top, "bottom": bottom, "rear": rear,
-            "lidar_min_m": None, "lidar_scan": scan, "state": None}
+            "lidar_min_m": None, "lidar_scan": scan, "state": None,
+            "pose": pose, "pose_conf": pose_conf}
 
 
 # ---- 합성 프레임 (bottom 프레임 규격: portrait 스플릿 후 320x480) ----
@@ -253,6 +256,43 @@ def test_road_lane_change():
     return ok
 
 
+# ---- 3b. road 차선 변경: 오도메트리 거리 조건 (타이밍 폴백 검증) ----
+
+def test_lane_change_distance_mode():
+    print("== road 차선 변경 오도메트리 거리 조건 ==")
+    ok = True
+    orig_out_m = LANE_CHANGE["out_m"]
+    try:
+        LANE_CHANGE["out_m"] = 1.0
+
+        # (a) pose_conf 충족: 이동 거리 도달 시 out_s 전에 OUT 종료
+        m, car, clk = RoadMission(), FakeCar(), FakeClock()
+        m.on_start(car, config)
+        m._now = clk
+        m.step(sensors(bottom=obstacle_frame(), pose=(0.0, 0.0, 0.0), pose_conf=0.9), car)
+        ok &= check("장애물 → OUT 시작 (pose0 기록)", m._lc_phase == "OUT"
+                    and m._lc_pose0 == (0.0, 0.0, 0.0))
+        clk.advance(0.2)  # out_s(1.5)보다 훨씬 이른 시점
+        m.step(sensors(bottom=blank(), pose=(1.2, 0.0, 0.0), pose_conf=0.9), car)
+        ok &= check("1.2m 이동(>=out_m 1.0) → 타이밍 전에 BACK 전환", m._lc_phase == "BACK")
+
+        # (b) pose_conf=0(미보정): 거리 무시, 기존 타이밍 그대로
+        m2, car2, clk2 = RoadMission(), FakeCar(), FakeClock()
+        m2.on_start(car2, config)
+        m2._now = clk2
+        m2.step(sensors(bottom=obstacle_frame(), pose=(0.0, 0.0, 0.0), pose_conf=0.0), car2)
+        clk2.advance(0.2)
+        m2.step(sensors(bottom=blank(), pose=(5.0, 0.0, 0.0), pose_conf=0.0), car2)
+        ok &= check("conf=0이면 거리 무시 — 0.2s에는 아직 OUT (fail-inert)",
+                    m2._lc_phase == "OUT")
+        clk2.advance(LANE_CHANGE["out_s"])
+        m2.step(sensors(bottom=blank(), pose=(5.0, 0.0, 0.0), pose_conf=0.0), car2)
+        ok &= check("conf=0이어도 타이밍(out_s)으로는 정상 전환", m2._lc_phase == "BACK")
+    finally:
+        LANE_CHANGE["out_m"] = orig_out_m
+    return ok
+
+
 # ---- 4. t_parking 미션 end-to-end ----
 
 def test_t_parking():
@@ -305,6 +345,7 @@ def main():
         test_vendor_fallback_sync(),
         test_traffic_fsm(),
         test_road_lane_change(),
+        test_lane_change_distance_mode(),
         test_t_parking(),
     ]
     passed = all(results)

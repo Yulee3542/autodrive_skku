@@ -1,3 +1,14 @@
+import math
+
+
+def traveled_m(pose0, pose1):
+    """두 pose (x, y, theta) 사이의 평면 이동 거리(m). 어느 쪽이든 None이면
+    None — 오도메트리 미가용 시 거리 조건이 조용히 비활성되도록."""
+    if pose0 is None or pose1 is None:
+        return None
+    return math.hypot(pose1[0] - pose0[0], pose1[1] - pose0[1])
+
+
 class Mission:
     """모든 미션의 베이스 클래스. mission_node(rclpy)가 매 tick step()을 호출한다.
 
@@ -11,18 +22,17 @@ class Mission:
       lidar_scan     : 원본 스캔 [(quality, angle_deg, dist_mm), ...] (없으면 None).
                        각도 변환/자차 필터는 nodes.lidar_node의 순수 함수 사용.
       state          : 아두이노 상태 0 정지 / 1 전진 / 2 후진 (없으면 None)
+      pose           : odometry_node의 상대 pose (x_m, y_m, theta_rad) —
+                       미션 시작 이후 상대 좌표, 전역/GPS 기준 아님 (없으면 None)
+      pose_conf      : pose 신뢰도 0.0~1.0 (기본 0.0). config.CAMERA_MOUNT/
+                       ODOMETRY.pwm_to_mps 실측 전에는 항상 0.0 — 미션은
+                       pose_conf가 자기 임계(min_pose_conf) 미만이면 pose를
+                       쓰지 않고 기존 타이밍 로직으로 동작해야 한다(fail-inert).
 
     car: ArduinoNode
       go() / stop() / drive(speed: -255..255, 음수=후진)
       steer('F'|'L'|'R')  — 스티어링 모터 펄스 (같은 값 연속 호출 무시)
       steer_pulse(d)      — 펄스 강제 반복 전송 (주차 기동용)
-
-    참고: odometry_node(IEEE 5520874 기반 VO+커맨드-적분 융합 상대 오도메트리)가
-    /car/pose(PoseStamped, 상대 좌표 — 전역/GPS 기준 아님)와
-    /car/pose_confidence(Float32)를 별도로 발행한다. 아직 mission_node가 이를
-    구독해 sensors dict에 넣어주지는 않으므로(계획된 후속 작업), 현재는
-    ros2 topic echo나 Foxglove로만 확인 가능 — config.CAMERA_MOUNT/
-    ODOMETRY.pwm_to_mps 실측 전까지는 confidence=0(사실상 비활성)이다.
     """
 
     name = "base"

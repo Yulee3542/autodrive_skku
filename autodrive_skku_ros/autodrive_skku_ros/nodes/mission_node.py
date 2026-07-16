@@ -12,6 +12,7 @@ import sys
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import CompressedImage, LaserScan
 from std_msgs.msg import Empty, Float32, Int8, Int16, String
 
@@ -141,6 +142,8 @@ class MissionNode(Node):
         self._back = None
         self._lidar_scan = None
         self._lidar_min_m = None
+        self._pose = None       # (x, y, theta) — odometry_node 상대 pose
+        self._pose_conf = 0.0   # 미수신/미보정 시 0.0 (fail-inert 기본값)
 
         self.declare_parameter("split", config.CAMERA_SPLIT)
         self._split = self.get_parameter("split").value
@@ -151,6 +154,8 @@ class MissionNode(Node):
                                   self._make_image_cb("back"), 10)
         self.create_subscription(LaserScan, "/scan", self._on_scan, 10)
         self.create_subscription(Float32, "/lidar/rear_min_m", self._on_rear_min, 10)
+        self.create_subscription(PoseStamped, "/car/pose", self._on_pose, 10)
+        self.create_subscription(Float32, "/car/pose_confidence", self._on_pose_conf, 10)
 
         self._car = RosCarProxy(self)
         self._show = self.get_parameter("show").value
@@ -192,6 +197,15 @@ class MissionNode(Node):
     def _on_rear_min(self, msg):
         self._lidar_min_m = None if math.isnan(msg.data) else msg.data
 
+    def _on_pose(self, msg):
+        # odometry_node는 z/w만 채운 평면 회전 quaternion을 발행 → theta 복원
+        q = msg.pose.orientation
+        self._pose = (msg.pose.position.x, msg.pose.position.y,
+                      2.0 * math.atan2(q.z, q.w))
+
+    def _on_pose_conf(self, msg):
+        self._pose_conf = float(msg.data)
+
     def _split_front(self):
         """/camera/front 한 장을 신호등용(top)/차선용(bottom)으로 나눈다 —
         camera_node는 물리 카메라 2대에 맞춰 front/back만 발행하고, 이 분할은
@@ -214,6 +228,8 @@ class MissionNode(Node):
             "lidar_min_m": self._lidar_min_m,
             "lidar_scan": self._lidar_scan,
             "state": self._car.state,
+            "pose": self._pose,
+            "pose_conf": self._pose_conf,
         }
         self._mission.step(sensors, self._car)
         if self._show and not show_frames(top, bottom, self._back):

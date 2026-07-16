@@ -9,7 +9,7 @@ except ImportError:
     cv2 = None
     np = None
 
-from .base import Mission
+from .base import Mission, traveled_m
 from .. import config as _config
 from ..nodes.lidar_node import filter_self, rear_min_m
 
@@ -31,6 +31,7 @@ T_PARKING = dict(
     hold_s=4.0,            # 완료 후 정지 유지 (규정 3~5초)
     park_max_s=12.0,       # PARK 상태 안전 타임아웃
     white_s_max=None, white_v_min=None,  # 주차선 흰색 override (None=config.WHITE_HSV)
+    min_pose_conf=0.3,     # 이 이상이어야 오도메트리 거리 기록/사용 (0=미보정, 비활성)
 )
 
 
@@ -70,6 +71,9 @@ class TParkingMission(Mission):
         self._park_t0 = 0.0
         self._park_pulses = 0
         self._park_last_pulse = 0.0
+        self._park_pose0 = None     # 서브 페이즈 시작 pose (오도메트리 가용 시)
+        self._creep_s_actual = None  # CREEP 실제 소요 시간 — 출차 미러링 기준
+        self._creep_m_actual = None  # CREEP 실제 이동 거리 (pose_conf 충족 시)
         car.go()
 
     def step(self, sensors, car):
@@ -103,11 +107,12 @@ class TParkingMission(Mission):
 
     # ---- (4단계) PARK 기동 시퀀스 — 서브 페이즈 머신 ----
 
-    def _park_enter(self, phase, now):
+    def _park_enter(self, phase, now, pose=None):
         self._park_phase = phase
         self._park_t0 = now
         self._park_pulses = 0
         self._park_last_pulse = 0.0
+        self._park_pose0 = pose
 
     def _park_pulse(self, car, direction, target, now):
         # 펄스 간격은 차선 변경과 동일한 값 공유 (steer_pulse 반복 전송 주기)
@@ -117,10 +122,16 @@ class TParkingMission(Mission):
             self._park_pulses += 1
             self._park_last_pulse = now
 
+    def _trusted_pose(self, sensors):
+        """pose_conf가 임계 이상일 때만 pose 반환 — 미보정(conf=0) 시 None."""
+        if sensors.get("pose_conf", 0.0) >= self.p["min_pose_conf"]:
+            return sensors.get("pose")
+        return None
+
     def _park_tick(self, sensors, car):
         now = self._now()
         if self._park_phase is None:
-            self._park_enter("TURN_IN", now)
+            self._park_enter("TURN_IN", now, self._trusted_pose(sensors))
         in_phase = now - self._park_t0
         # 슬롯 쪽으로 "후진" 진입 — 후진 시 차체 뒤가 조향 반대쪽으로 돈다
         turn_dir = "L" if self.p["side"] == "R" else "R"
@@ -130,14 +141,14 @@ class TParkingMission(Mission):
             car.drive(-self.config.SLOW_SPEED)
             self._park_pulse(car, turn_dir, self.p["turn_in_pulses"], now)
             if in_phase >= self.p["turn_in_s"]:
-                self._park_enter("STRAIGHTEN", now)
+                self._park_enter("STRAIGHTEN", now, self._trusted_pose(sensors))
 
         elif self._park_phase == "STRAIGHTEN":
             car.drive(-self.config.SLOW_SPEED)
             self._park_pulse(car, counter, self.p["turn_in_pulses"], now)
             if in_phase >= self.p["straighten_s"]:
                 car.steer("F")
-                self._park_enter("CREEP", now)
+                self._park_enter("CREEP", now, self._trusted_pose(sensors))
 
         elif self._park_phase == "CREEP":
             car.drive(-self.config.SLOW_SPEED)
@@ -146,6 +157,11 @@ class TParkingMission(Mission):
             if steer is not None:
                 car.steer(steer)
             if self.parked(sensors) or in_phase >= self.p["park_max_s"]:
+                # 진입 CREEP의 실측 시간/거리를 기록 — 출차(EXIT_CREEP)가 같은
+                # 만큼 전진해 슬롯을 빠져나가는 미러링 기준이 된다.
+                self._creep_s_actual = in_phase
+                self._creep_m_actual = traveled_m(self._park_pose0,
+                                                  self._trusted_pose(sensors))
                 car.drive(0)
                 car.steer("F")
                 self._park_enter("HOLD", now)
