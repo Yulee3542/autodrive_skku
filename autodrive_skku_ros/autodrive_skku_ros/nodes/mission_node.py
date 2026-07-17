@@ -106,6 +106,15 @@ class RosCarProxy:
         self._steer_pulse_pub = node.create_publisher(String, "/car/cmd/steer_pulse", 10)
         self._state = None
         node.create_subscription(Int8, "/car/state", self._on_state, 10)
+        # go/stop 게이트 + 마지막 속도 — republish()가 매 틱 재발행한다. 미션은
+        # on_start()에서 go()/drive()를 딱 한 번만 부르는 경우가 많은데(steer()는
+        # follow_lane_poi 등이 매 틱 부름), mission_node와 arduino_node는 별도
+        # 프로세스라 그 한 번이 두 노드의 DDS 디스커버리가 끝나기 전에 나가면
+        # 그냥 유실된다(기본 QoS는 late-joiner 재전송 없음) — 2026-07-17 실차에서
+        # "조향은 되는데 안 움직임"으로 반복 확인. steer()처럼 계속 재발행해
+        # 디스커버리가 끝난 뒤 어느 틱에서든 반드시 한 번은 도착하게 만든다.
+        self._gate_open = False
+        self._last_speed = 0
 
     def _on_state(self, msg):
         self._state = None if msg.data == STATE_UNKNOWN else msg.data
@@ -115,13 +124,23 @@ class RosCarProxy:
         return self._state
 
     def go(self):
+        self._gate_open = True
         self._go_pub.publish(Empty())
 
     def stop(self):
+        self._gate_open = False
+        self._last_speed = 0
         self._stop_pub.publish(Empty())
 
     def drive(self, speed):
-        self._drive_pub.publish(Int16(data=int(speed)))
+        self._last_speed = int(speed)
+        self._drive_pub.publish(Int16(data=self._last_speed))
+
+    def republish(self):
+        """go/stop 게이트와 마지막 drive 속도를 다시 발행 — mission_node가 매 틱
+        호출한다(steer는 이미 미션들이 매 틱 부르므로 별도 처리 불필요)."""
+        (self._go_pub if self._gate_open else self._stop_pub).publish(Empty())
+        self._drive_pub.publish(Int16(data=self._last_speed))
 
     def steer(self, direction):
         self._steer_pub.publish(String(data=direction))
@@ -254,6 +273,10 @@ class MissionNode(Node):
             "pose_conf": pose_conf,
         }
         self._mission.step(sensors, self._car)
+        # go/stop 게이트 + 마지막 drive 속도를 매 틱 재발행 — mission_node/
+        # arduino_node가 별도 프로세스라 on_start()의 단발 go()/drive()가 DDS
+        # 디스커버리 완료 전에 나가면 유실될 수 있음(RosCarProxy.republish() 참고).
+        self._car.republish()
         if self._show and not show_frames(top, bottom, self._back):
             self._show = False
 
