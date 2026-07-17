@@ -6,7 +6,7 @@ except ImportError:
     cv2 = None
 
 from .base import Mission
-from .lane_follow import follow_lane, LANE_EDGE
+from .lane_follow import LaneCenterTracker, follow_lane_poi, LANE_POI
 from .. import config as _config
 
 # vendor 미설치 개발 환경용 폴백 상수 복사본. vendor 파일은 수정 금지(대회 규정)라
@@ -96,11 +96,9 @@ class TrafficMission(Mission):
     name = "traffic"
 
     def on_start(self, car, config):
-        assert set(LANE_EDGE) == {"width", "height", "gap", "threshold"}, \
-            f"LANE_EDGE 키가 예상과 다름: {set(LANE_EDGE)}"
         self.config = config
         self.debug = {}
-        self.env = fl.libCAMERA() if fl is not None else None
+        self._lane_tracker = LaneCenterTracker()
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
         self.wait = None            # None | "line" | "red"
         self.wait_t0 = 0.0
@@ -139,7 +137,8 @@ class TrafficMission(Mission):
             return
 
         car.drive(self.config.DRIVE_SPEED)
-        follow_lane(self.env, car, sensors.get("bottom"), LANE_EDGE)
+        self.debug["lane_poi"] = follow_lane_poi(
+            self._lane_tracker, car, sensors.get("bottom"), LANE_POI)
 
     def _resume(self, car, now):
         self.wait = None

@@ -11,6 +11,8 @@ tools/run_tests.py(하드웨어 없는 로직 스모크 테스트)와 달리 이
     python tools/hw_test.py --forward              # 전진 모듈만
     python tools/hw_test.py --no-steer              # 조향만 빼고 (=전진만)
     python tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
+    python tools/hw_test.py --pot                   # 조향 POT 캘리브레이션 span 진단만
+                                                     # (전진/조향 테스트는 생략)
 """
 import argparse
 import os
@@ -54,6 +56,28 @@ def test_steer(car, pulse_gap_s):
     car.steer("F")
 
 
+def test_pot(car):
+    """조향 POT 캘리브레이션 span 진단 — ArduinoNode.calibrate_steering()을
+    그대로 호출해(자동 좌/우 풀락 스윕 + 중앙값 필터, 새 로직 없음) span을
+    config.ODOMETRY.min_pot_span_counts(odometry_node가 POT 각도를 신뢰할
+    최소 기준)와 비교해 경고를 출력한다."""
+    print("\n### [pot] 조향 POT 캘리브레이션 span 진단 — 좌/우 풀락 자동 스윕 중...")
+    adc_left, adc_right = car.calibrate_steering()
+    if adc_left is None:
+        print("  -> POT 미검출/응답 없음 — 미장착이거나 배선(A6/기준전압) 문제로 추정")
+        return
+    span = abs(adc_left - adc_right)
+    min_span = config.ODOMETRY["min_pot_span_counts"]
+    print(f"  -> adc_left={adc_left}, adc_right={adc_right}, span={span} "
+          f"(odometry_node 신뢰 기준: min_pot_span_counts={min_span})")
+    if span < min_span:
+        print(f"  ⚠ span이 기준 미달 — POT 축 결합(조향 회전이 POT에 제대로 "
+              "전달되는지)·기준전압(5V/GND) 점검 필요")
+        print("     이대로면 각도 해상도가 부족해 odometry_node가 펄스 폴백으로 동작합니다")
+    else:
+        print("  span 양호 — odometry_node가 POT 각도를 신뢰해 사용합니다")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="실차 전진/조향 모듈 수동 테스트")
     parser.add_argument("--port", default=config.ARDUINO_PORT,
@@ -65,6 +89,9 @@ def build_parser():
     for key, desc in MODULES.items():
         parser.add_argument(f"--{key}", dest=key, action=argparse.BooleanOptionalAction,
                             default=None, help=desc)
+    parser.add_argument("--pot", action="store_true",
+                        help="조향 POT 캘리브레이션 span 진단만 실행 "
+                             "(전진/조향 모듈 없이 이것만 하고 종료)")
     return parser
 
 
@@ -82,7 +109,6 @@ def select_modules(args):
 
 def main():
     args = build_parser().parse_args()
-    selected = select_modules(args)
 
     port = args.port
     if port is None:
@@ -91,6 +117,22 @@ def main():
         print("[hw_test] 아두이노 포트를 찾지 못했습니다 — --port로 직접 지정하세요")
         sys.exit(1)
 
+    if args.pot:
+        print(f"POT 캘리브레이션 span 진단 (포트: {port})")
+        print("!! 조향 모터가 좌우로 스윕합니다 — 바퀴가 걸리지 않는지 확인하세요 !!")
+        if input("계속하려면 y 입력 > ").strip().lower() != "y":
+            print("취소됨")
+            return
+        car = ArduinoNode(port, config.ARDUINO_BAUD)
+        try:
+            test_pot(car)
+        except KeyboardInterrupt:
+            print("\n중단됨")
+        finally:
+            car.close()
+        return
+
+    selected = select_modules(args)
     print(f"실행할 모듈: {', '.join(selected)} (포트: {port})")
     print("!! 바퀴를 지면에서 띄운 상태인지 확인하세요 — 실제로 모터가 움직입니다 !!")
     if input("계속하려면 y 입력 > ").strip().lower() != "y":

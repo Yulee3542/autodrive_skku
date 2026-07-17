@@ -1,3 +1,5 @@
+import math
+
 try:
     from ..vendor import Function_Library as fl
 except ImportError:  # 패키지 미설치 개발 환경 — 차선 인식 없이 골격만 동작
@@ -72,6 +74,20 @@ LANE_POI = dict(
     trapezoid_near_half_frac=0.50,  # 가장 가까운 밴드: 중앙 기준 ±50%(=전체 폭)
     trapezoid_far_half_frac=0.22,   # 가장 먼 밴드: 중앙 기준 ±22%로 좁힘
     smoothing_alpha=0.3,        # 프레임 간 스무딩(EMA) 반영 비율
+    # ---- 곡선 구간용 Circular Hough Transform 보정 (2026-07-17, 교수님 제안) ----
+    # POI 전체를 한 번 이진화해 cv2.HoughCircles로 차선을 근사하는 원을 찾고,
+    # 기존 밴드 타겟과 hough_min_inlier_bands개 이상 일치할 때만 그 원 위의
+    # 매끄러운 점으로 밴드 타겟을 대체한다. 원을 못 찾거나 안 맞으면 기존
+    # 밴드별 클러스터링 결과를 그대로 쓴다(완전 폴백) — 직선/완만한 구간에서
+    # 기존 검증된 동작을 그대로 보존하기 위함.
+    hough_enabled=True,
+    hough_dp=1.5,                # HoughCircles 누산기 해상도(1=원본, 클수록 저해상도/빠름)
+    hough_param1=100,            # HoughCircles 내부 Canny 상단 임계(하단은 절반)
+    hough_param2=25,             # 누산기 임계 — 낮을수록 관대(오검출 위험↑) 📏
+    hough_min_radius_px=150,     # 이보다 작은 원은 노이즈로 배제 📏
+    hough_max_radius_px=2000,    # 이보다 크면 사실상 직선 취급 📏
+    hough_min_inlier_bands=3,    # 원 채택에 필요한 최소 일치 밴드 수
+    hough_inlier_tol_px=25,      # 밴드 타겟과 원호 예측치 허용 오차(px)
 )
 
 
@@ -140,6 +156,33 @@ def _poi_band_x_range(w, cx, n_bands, i, near_half, far_half):
     return max(0, int(cx - half_px)), min(w, int(cx + half_px))
 
 
+def _fit_lane_circle(binary, x_off, y_off, cfg):
+    """POI 전체 이진 마스크(0/255, 8bit 1채널)에서 차선을 근사하는 원 하나를
+    Circular Hough Transform(cv2.HoughCircles)으로 찾는다. 절대좌표
+    (cx, cy, r) 또는 못 찾으면 None — 호출부가 기존 밴드 클러스터링으로
+    폴백한다(직선/완만한 구간은 원이 안 잡히는 게 정상)."""
+    h = binary.shape[0]
+    circles = cv2.HoughCircles(
+        binary, cv2.HOUGH_GRADIENT, dp=cfg["hough_dp"], minDist=max(h, 1),
+        param1=cfg["hough_param1"], param2=cfg["hough_param2"],
+        minRadius=cfg["hough_min_radius_px"], maxRadius=cfg["hough_max_radius_px"])
+    if circles is None:
+        return None
+    cx, cy, r = circles[0][0]
+    return float(cx) + x_off, float(cy) + y_off, float(r)
+
+
+def _circle_x_at_y(cx, cy, r, y, prefer_x):
+    """원(cx, cy, r) 위에서 y에 해당하는 x — 이차방정식 두 해 중 기존 밴드
+    타겟(prefer_x)에 더 가까운 쪽을 선택. y가 원 밖(|y-cy|>r)이면 None."""
+    dy = y - cy
+    if abs(dy) > r:
+        return None
+    dx = math.sqrt(max(r * r - dy * dy, 0.0))
+    x1, x2 = cx - dx, cx + dx
+    return x1 if abs(x1 - prefer_x) <= abs(x2 - prefer_x) else x2
+
+
 class LaneCenterTracker:
     """follow_lane_poi()의 프레임 간 스무딩 상태(EMA)를 들고 있는 객체 --
     미션 on_start()에서 하나 만들어 매 틱 재사용한다."""
@@ -188,6 +231,32 @@ def analyze_lane_poi(frame, config=LANE_POI):
             path_points.append(((y0 + y1) // 2, target))
 
     path_points.sort(key=lambda p: -p[0])  # 가까운(아래) -> 먼(위) 순
+
+    circle = None
+    if config["hough_enabled"] and len(path_points) >= config["hough_min_inlier_bands"]:
+        y_top = int(h * config["roi_frac"][0])
+        y_bottom = int(h * config["roi_frac"][1])
+        gray_full = cv2.cvtColor(frame[y_top:y_bottom, :], cv2.COLOR_BGR2GRAY)
+        _, binary_full = cv2.threshold(gray_full, config["white_thresh"], 255,
+                                       cv2.THRESH_BINARY)
+        fit = _fit_lane_circle(binary_full, 0, y_top, config)
+        if fit is not None:
+            ccx, ccy, cr = fit
+            fitted, inliers = [], 0
+            for y_mid, col in path_points:
+                x_on_circle = _circle_x_at_y(ccx, ccy, cr, y_mid, col)
+                if x_on_circle is None:
+                    fitted.append((y_mid, col))
+                    continue
+                if abs(x_on_circle - col) <= config["hough_inlier_tol_px"]:
+                    inliers += 1
+                fitted.append((y_mid, x_on_circle))
+            # 기존 밴드 타겟과 hough_min_inlier_bands개 이상 일치할 때만 채택 —
+            # 아니면 fitted를 버리고 path_points(기존 클러스터링 결과)를 그대로 둔다.
+            if inliers >= config["hough_min_inlier_bands"]:
+                path_points = fitted
+                circle = dict(cx=ccx, cy=ccy, r=cr, inliers=inliers)
+
     raw_target = None
     if path_points:
         weights_sum = 0.0
@@ -199,7 +268,7 @@ def analyze_lane_poi(frame, config=LANE_POI):
         raw_target = weighted / weights_sum
 
     return dict(cx=cx, w=w, h=h, bands=bands,
-                path_points=path_points, raw_target=raw_target)
+                path_points=path_points, raw_target=raw_target, circle=circle)
 
 
 def follow_lane_poi(tracker, car, frame, config=LANE_POI):
