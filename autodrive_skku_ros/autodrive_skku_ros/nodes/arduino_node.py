@@ -317,17 +317,14 @@ def ros_main(args=None):
 
             self._car = ArduinoNode(port, baud)
 
-            self._adc_left = None
-            self._adc_right = None
-            self._adc_span = None
-            if self.get_parameter("calibrate_steering").value:
-                self.get_logger().info("조향 캘리브레이션 시작 (좌/우 풀락 탐색)...")
-                self._adc_left, self._adc_right = self._car.calibrate_steering()
-                if self._adc_left is None:
-                    self.get_logger().warn("조향 POT 미검출 — 캘리브레이션 없이 펄스 방식으로 동작")
-                else:
-                    self._adc_span = abs(self._adc_left - self._adc_right)
-
+            # 구독/발행/타이머를 먼저 등록한다 — calibrate_steering()이 최대
+            # 수 초간 블로킹하는 동안(2026-07-17 실차 로그: ~4초), mission_node는
+            # 별도 프로세스라 이미 on_start()에서 car.go()/car.drive()를 (한 번만)
+            # 발행해버릴 수 있다. 구독이 나중에 생기면 기본 QoS(VOLATILE)라
+            # 그 사이 도착한 메시지는 유실되고 — go/drive를 반복 호출하지 않는
+            # 미션(road 등)에서는 차가 조향만 되고 영원히 안 움직이는 버그가
+            # 됐었다. DDS 레벨에서는 구독 등록만 되면(콜백은 spin() 시작 후 처리)
+            # 큐잉되므로, 블로킹 작업 전에 구독부터 만들면 메시지가 안 유실된다.
             self.create_subscription(Empty, "/car/cmd/go", self._on_go, 10)
             self.create_subscription(Empty, "/car/cmd/stop", self._on_stop, 10)
             self.create_subscription(Int16, "/car/cmd/drive", self._on_drive, 10)
@@ -345,6 +342,17 @@ def ros_main(args=None):
             # 너무 거칠다.
             self._span_pub = self.create_publisher(Int32, "/car/steering_pot_span", 10)
             self.create_timer(1.0 / config.LOOP_HZ, self._publish_state)
+
+            self._adc_left = None
+            self._adc_right = None
+            self._adc_span = None
+            if self.get_parameter("calibrate_steering").value:
+                self.get_logger().info("조향 캘리브레이션 시작 (좌/우 풀락 탐색)...")
+                self._adc_left, self._adc_right = self._car.calibrate_steering()
+                if self._adc_left is None:
+                    self.get_logger().warn("조향 POT 미검출 — 캘리브레이션 없이 펄스 방식으로 동작")
+                else:
+                    self._adc_span = abs(self._adc_left - self._adc_right)
 
         def _on_go(self, _msg):
             self._car.go()
