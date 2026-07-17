@@ -53,6 +53,59 @@ def autodetect_ports():
     return arduino, lidar
 
 
+def _read_sysfs(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def autodetect_cameras(name_filter="c920", video_glob="/dev/video*",
+                        glob_fn=glob.glob, read_text=_read_sysfs):
+    """연결된 V4L2 카메라 중 name_filter(대소문자 무관 부분일치)에 맞는
+    장치의 /dev/videoN 인덱스를 오름차순으로 반환 (예: [2, 4]).
+
+    v4l2-ctl 같은 외부 도구 없이 /sys/class/video4linux/videoN/{name,index}를
+    직접 읽는다 — 이름은 장치 모델명, index는 같은 물리 카메라가 내놓는 여러
+    /dev/videoN 중 몇 번째인지(0=캡처용, 1+=메타데이터 등 부가 노드)다.
+    index=0(캡처용)만 남겨서 같은 카메라를 중복으로 세지 않는다.
+
+    한 로봇에 동일 모델 카메라가 여러 대(전방/후방)면 어느 인덱스가 어느
+    방향인지는 이 함수가 알 수 없다 — 물리적 마운트 방향 문제라 사람이
+    Foxglove로 한 번 확인해야 한다. 호출부(bringup.launch.py)가 찾은 순서대로
+    front/rear 기본값에 배정하고, 틀리면 front_camera:=/rear_camera:= 인자로
+    바꾸는 걸 전제로 한다.
+
+    실패(권한 없음, /sys 미지원 플랫폼 등)해도 예외 없이 빈 리스트 반환 —
+    호출부는 기존 고정 기본값(front_camera:=0)으로 폴백."""
+    matches = []
+    try:
+        paths = sorted(glob_fn(video_glob))
+    except Exception:
+        return []
+    for path in paths:
+        try:
+            n = int(path.rsplit("video", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        try:
+            name = read_text(f"/sys/class/video4linux/video{n}/name")
+        except Exception:
+            name = None
+        if not name or name_filter.lower() not in name.lower():
+            continue
+        try:
+            index_str = read_text(f"/sys/class/video4linux/video{n}/index")
+        except Exception:
+            index_str = None
+        sub_index = int(index_str) if index_str and index_str.strip().lstrip("-").isdigit() else 0
+        if sub_index != 0:
+            continue
+        matches.append(n)
+    return matches
+
+
 # 우리 launch가 띄우는 노드 실행파일 이름 — 비정상 종료(Qt abort, rplidar
 # buffer overflow 등 SIGABRT류) 후 좀비로 남을 수 있는 것들. rplidar_composition/
 # foxglove_bridge는 서드파티 실행파일이라 이름으로만 매칭.
@@ -157,6 +210,35 @@ def selftest():
         autodetect_ports)
     check("아두이노로 이미 잡힌 포트는 라이다 후보에서 제외",
           arduino == "/dev/ttyACM0" and lidar == "/dev/ttyACM1")
+
+    # ---- autodetect_cameras (2026-07-17 실차: video0이 엉뚱한 웹캠이라 발견) ----
+    fake_sysfs = {
+        "/sys/class/video4linux/video0/name": "720p HD Camera: 720p HD Camera",
+        "/sys/class/video4linux/video0/index": "0",
+        "/sys/class/video4linux/video1/name": "720p HD Camera: 720p HD Camera",
+        "/sys/class/video4linux/video1/index": "1",
+        "/sys/class/video4linux/video2/name": "HD Pro Webcam C920",
+        "/sys/class/video4linux/video2/index": "0",
+        "/sys/class/video4linux/video3/name": "HD Pro Webcam C920",
+        "/sys/class/video4linux/video3/index": "1",
+        "/sys/class/video4linux/video4/name": "HD Pro Webcam C920",
+        "/sys/class/video4linux/video4/index": "0",
+        "/sys/class/video4linux/video5/name": "HD Pro Webcam C920",
+        "/sys/class/video4linux/video5/index": "1",
+    }
+    cams = autodetect_cameras(
+        glob_fn=lambda _pattern: [f"/dev/video{i}" for i in range(6)],
+        read_text=lambda p: fake_sysfs.get(p))
+    check("실차 재현: C920 캡처 노드(index=0)만 [2, 4] — 720p 웹캠/메타데이터 노드 제외",
+          cams == [2, 4])
+
+    cams_none = autodetect_cameras(glob_fn=lambda _p: [], read_text=lambda p: None)
+    check("장치 없으면 빈 리스트", cams_none == [])
+
+    def raising_read(_p):
+        raise OSError("permission denied")
+    cams_safe = autodetect_cameras(glob_fn=lambda _p: ["/dev/video0"], read_text=raising_read)
+    check("sysfs 읽기 실패해도 예외 없이 빈 리스트로 폴백", cams_safe == [])
 
     # ---- cleanup_stale_ros_state (launch 시작 전 좀비/스테일 SHM 정리) ----
     pkill_calls = []

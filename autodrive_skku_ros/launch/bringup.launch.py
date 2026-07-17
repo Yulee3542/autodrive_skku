@@ -42,7 +42,8 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-from autodrive_skku_ros.nodes.ports import autodetect_ports, cleanup_stale_ros_state
+from autodrive_skku_ros.nodes.ports import (
+    autodetect_cameras, autodetect_ports, cleanup_stale_ros_state)
 
 
 def generate_launch_description():
@@ -56,6 +57,16 @@ def generate_launch_description():
               f"SHM 락 파일 {len(_removed_shm)}개 제거")
 
     auto_arduino, auto_lidar = autodetect_ports()
+
+    # 카메라 모델(C920)로 자동 필터링 — USB 재열거로 /dev/videoN 번호가
+    # 매번 바뀔 수 있어(2026-07-17 실차: video0이 엉뚱한 내장/타사 웹캠이라
+    # front_camera 기본값 0이 틀렸던 사례) 이름으로 우리 카메라만 골라낸다.
+    # 어느 인덱스가 전방/후방인지는 물리 마운트 방향 문제라 자동으로 알 수
+    # 없음 — 찾은 순서대로 앞부터 배정하고, 틀리면 front_camera:=/rear_camera:=
+    # 로 바꿀 것(Foxglove로 실제 화면 보고 확인).
+    _auto_cams = autodetect_cameras()
+    auto_front_camera = _auto_cams[0] if len(_auto_cams) >= 1 else 0
+    auto_rear_camera = _auto_cams[1] if len(_auto_cams) >= 2 else -1
 
     run_mission_arg = DeclareLaunchArgument(
         "run_mission", default_value="true",
@@ -71,9 +82,15 @@ def generate_launch_description():
     lidar_port_arg = DeclareLaunchArgument(
         "lidar_port", default_value=auto_lidar or "/dev/ttyUSB0",
         description="라이다 시리얼 포트")
-    front_camera_arg = DeclareLaunchArgument("front_camera", default_value="0")
+    front_camera_arg = DeclareLaunchArgument(
+        "front_camera", default_value=str(auto_front_camera),
+        description="전방 카메라 /dev/videoN 인덱스 — 이름(C920)으로 자동 감지, "
+                     "다른 카메라(웹캠 등)와 섞여 있으면 순서가 틀릴 수 있으니 "
+                     "Foxglove로 확인 후 필요하면 직접 지정할 것")
     rear_camera_arg = DeclareLaunchArgument(
-        "rear_camera", default_value="-1", description="-1이면 후방 카메라 미사용")
+        "rear_camera", default_value=str(auto_rear_camera),
+        description="-1이면 후방 카메라 미사용 — C920이 2대 이상 감지되면 "
+                     "두 번째를 자동 사용, 아니면 -1")
     show_arg = DeclareLaunchArgument(
         "show", default_value="false",
         description="카메라 창 표시 (디스플레이 필요 — DISPLAY 환경변수 없으면 "
