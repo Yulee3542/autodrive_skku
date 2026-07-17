@@ -73,7 +73,8 @@ def white_hsv(detector_cfg):
 WHEELBASE_M = 0.545
 TRACK_WIDTH_M = 0.430
 WHEEL_RADIUS_M = 0.10
-STEERING_LIMIT_DEG = 20
+STEERING_LIMIT_DEG = 20.0  # float 고정 — 정수면 각도 클램프(min/max) 결과가 int로
+                            # 오염돼 Float32 발행 시 타입 assert로 죽는다(2026-07-17 실차)
 FRONT_CAMERA_SENSOR_HFOV_DEG = 78   # Logitech C920 spec (센서 자체, landscape 기준)
 FRONT_CAMERA_MOUNT_VFOV_DEG = 49    # 파노라믹(landscape) 마운트 실효 수직화각 (sim 기준 vFOV)
 

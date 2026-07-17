@@ -161,7 +161,11 @@ def steer_dedup_pulse(direction, last_direction):
 def apply_steer_pulse(direction, pulse_state_deg, deg_per_pulse, steering_limit_deg):
     """L/R 펄스 1회를 조향각 적분 상태(pulse_state_deg)에 반영, ±steering_limit_deg로
     클램프. deg_per_pulse가 0/None(미측정)이면 상태가 안 바뀐다 — 모르는 조향각을
-    함부로 추정하지 않고 직진(0도)으로 취급하는 fail-inert 동작."""
+    함부로 추정하지 않고 직진(0도)으로 취급하는 fail-inert 동작.
+
+    반환은 항상 float로 고정한다 — steering_limit_deg가 int로 들어오면(예:
+    ros2 param set으로 정수 설정) 클램프된 결과가 int로 오염될 수 있다
+    (arduino_node.adc_to_deg에서 실차로 확인된 것과 같은 종류의 버그)."""
     if not deg_per_pulse:
         return pulse_state_deg
     if direction == "L":
@@ -170,7 +174,7 @@ def apply_steer_pulse(direction, pulse_state_deg, deg_per_pulse, steering_limit_
         pulse_state_deg -= deg_per_pulse
     else:
         return pulse_state_deg
-    return max(-steering_limit_deg, min(steering_limit_deg, pulse_state_deg))
+    return float(max(-steering_limit_deg, min(steering_limit_deg, pulse_state_deg)))
 
 
 def select_steering_angle_deg(pot_angle_deg, pot_span_counts, pulse_state_deg, odo_cfg):

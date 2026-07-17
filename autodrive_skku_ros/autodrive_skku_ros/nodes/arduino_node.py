@@ -270,13 +270,19 @@ STATE_UNKNOWN = -1
 
 
 def adc_to_deg(adc, adc_left, adc_right, angle_left_deg, angle_right_deg):
-    """조향 POT ADC → 각도[deg] 선형 매핑 + 클램프 (calibrate_steering 결과 사용)."""
+    """조향 POT ADC → 각도[deg] 선형 매핑 + 클램프 (calibrate_steering 결과 사용).
+
+    반환은 항상 float로 고정한다 — 클램프가 걸리면 min()/max()가 lo/hi를
+    그대로 반환하는데, 호출부가 config.STEERING_LIMIT_DEG(int) 같은 정수
+    한계값을 넘기면 클램프된 결과가 int가 돼 Float32 발행 시 타입 assert로
+    죽는다(2026-07-17 실차: ADC 노이즈로 실제 클램프가 걸려서야 처음 발견됨).
+    """
     if adc_left == adc_right:
         return 0.0
     t = (adc - adc_right) / (adc_left - adc_right)
     deg = angle_right_deg + t * (angle_left_deg - angle_right_deg)
     lo, hi = min(angle_left_deg, angle_right_deg), max(angle_left_deg, angle_right_deg)
-    return max(lo, min(hi, deg))
+    return float(max(lo, min(hi, deg)))
 
 
 # ============================ ROS2 래퍼 ============================

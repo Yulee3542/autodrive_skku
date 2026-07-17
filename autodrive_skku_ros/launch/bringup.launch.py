@@ -42,10 +42,19 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-from autodrive_skku_ros.nodes.ports import autodetect_ports
+from autodrive_skku_ros.nodes.ports import autodetect_ports, cleanup_stale_ros_state
 
 
 def generate_launch_description():
+    # 이전 실행이 크래시(Qt abort, rplidar buffer overflow 등 SIGABRT류)로
+    # 죽으면 자식 프로세스가 좀비로 남거나 FastDDS 공유메모리 락 파일이 안
+    # 지워져 이번 실행이 "Failed init_port fastrtps_port<N>" + 노드 디스커버리
+    # 실패를 물려받는다(2026-07-17 실차에서 반복 확인) — 매 launch 시작 시 정리.
+    _killed, _removed_shm = cleanup_stale_ros_state()
+    if _killed or _removed_shm:
+        print(f"[cleanup] 이전 실행 잔재 정리: 프로세스={_killed or '없음'}, "
+              f"SHM 락 파일 {len(_removed_shm)}개 제거")
+
     auto_arduino, auto_lidar = autodetect_ports()
 
     run_mission_arg = DeclareLaunchArgument(
