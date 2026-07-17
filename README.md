@@ -130,6 +130,8 @@ ros2 run autodrive_skku_ros mission_node
 |------|------|
 | `mission:={road,traffic,t_parking,test}` (`run_mission:=true`면 필수) | [미션 상세](#미션-상세) 참고 |
 | `run_mission:=false` | `mission_node` 없이 센서/액추에이터 노드만 기동 — [5단계](#5단계-수동-조작으로-구동-확인) 참고 |
+| `run_arduino:=false` | 기본 `true` — `arduino_node` 없이 기동해 모터를 전혀 안 움직이게 함. `mission_node`가 계산해 `/car/cmd/steer` 등에 발행하는 값을 `ros2 topic echo`로만 안전하게 관찰(검출 로직 검증)하고 싶을 때 |
+| `run_lidar:=false` | 기본 `true` — `rplidar`/`lidar_node` 없이 기동. 라이다 연결이 불안정할 때, 순수 카메라 기반 검출만 볼 때 |
 | `arduino_port:=/dev/ttyACM0` | 아두이노 포트 (기본: 자동 감지) |
 | `lidar_port:=/dev/ttyUSB0` | 라이다 포트 (기본: 자동 감지) |
 | `front_camera:=0` | 전방 카메라 인덱스 (기본: 이름(C920)으로 자동 감지 — USB 재열거로 다른 카메라와 섞여 순서가 틀리면 직접 지정. `ls /dev/video*` + `v4l2-ctl --list-devices`로 확인) |
