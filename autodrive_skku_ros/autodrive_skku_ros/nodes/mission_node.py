@@ -145,6 +145,7 @@ class MissionNode(Node):
         self._lidar_min_m = None
         self._pose = None       # (x, y, theta) — odometry_node 상대 pose
         self._pose_conf = 0.0   # 미수신/미보정 시 0.0 (fail-inert 기본값)
+        self._pose_stamp = None  # 마지막 /car/pose 수신 시각 — staleness 감시용
 
         self.declare_parameter("split", config.CAMERA_SPLIT)
         self._split = self.get_parameter("split").value
@@ -203,6 +204,7 @@ class MissionNode(Node):
         q = msg.pose.orientation
         self._pose = (msg.pose.position.x, msg.pose.position.y,
                       2.0 * math.atan2(q.z, q.w))
+        self._pose_stamp = self.get_clock().now()
 
     def _on_pose_conf(self, msg):
         self._pose_conf = float(msg.data)
@@ -222,6 +224,13 @@ class MissionNode(Node):
     def _tick(self):
         # sensors dict 스키마: missions/base.py의 Mission 클래스 docstring 참고
         top, bottom = self._split_front()
+        # odometry_node가 죽거나 멈춰 /car/pose가 갱신을 멈추면 pose_conf를
+        # 마지막 값으로 영원히 유지하지 않도록 강제로 0(미가용)까지 낮춘다 —
+        # t_parking 점유 격자 등이 문서화된 fail-inert 폴백 경로로 자연 진입.
+        stale = (self._pose_stamp is None or
+                 (self.get_clock().now() - self._pose_stamp).nanoseconds
+                 > config.POSE_STALE_S * 1e9)
+        pose_conf = 0.0 if stale else self._pose_conf
         sensors = {
             "top": top,
             "bottom": bottom,
@@ -230,7 +239,7 @@ class MissionNode(Node):
             "lidar_scan": self._lidar_scan,
             "state": self._car.state,
             "pose": self._pose,
-            "pose_conf": self._pose_conf,
+            "pose_conf": pose_conf,
         }
         self._mission.step(sensors, self._car)
         if self._show and not show_frames(top, bottom, self._back):

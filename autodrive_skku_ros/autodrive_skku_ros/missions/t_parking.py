@@ -44,6 +44,7 @@ T_PARKING = dict(
     exit_mode="lane",      # "lane"=출차 후 차선유지로 OUT까지 주행(규정 기본) | "stop"=출차 후 정지
     exit_creep_s=3.0,      # 진입 CREEP 실측 기록이 없을 때의 전진 이탈 시간 폴백
     exit_margin_s=0.5,     # 전진 이탈 시간 여유 (진입보다 살짝 더 나감)
+    exit_margin_m=0.15,    # 전진 이탈 거리 여유 (오도메트리 신뢰 시, 시간 여유와 동일 취지)
     exit_turn_s=2.0,       # 진입 방향과 같은 조향으로 호를 되짚는 구간
     exit_straight_s=1.0,   # 반대 조향으로 차체 재정렬 구간
     exit_max_s=15.0,       # EXIT 전체 안전 타임아웃 (park_max_s 패턴)
@@ -208,7 +209,10 @@ class TParkingMission(Mission):
 
     # ---- (5단계) 출차 기동 시퀀스 — 진입 미러 서브 페이즈 머신 ----
 
-    def _finish_exit(self, car):
+    def _finish_exit(self, car, timed_out=False):
+        # exit_result: 텔레메트리/로그에서 타임아웃(사실상 f7 출차실패)을 정상
+        # 완료와 구분하기 위한 표시. 판정 로직 자체를 바꾸지는 않는다.
+        self.debug["exit_result"] = "timeout" if timed_out else "ok"
         car.steer("F")
         if self.p["exit_mode"] == "lane":
             self.state = "LANE_FOLLOW"
@@ -229,7 +233,7 @@ class TParkingMission(Mission):
 
         if now - self._exit_t_start >= self.p["exit_max_s"]:
             print("[t_parking] EXIT 타임아웃 — 안전 종료")
-            self._finish_exit(car)
+            self._finish_exit(car, timed_out=True)
             return
 
         if self._park_phase == "EXIT_CREEP":
@@ -240,7 +244,8 @@ class TParkingMission(Mission):
                 + self.p["exit_margin_s"]
             if not done and self._creep_m_actual:
                 d = traveled_m(self._park_pose0, self._trusted_pose(sensors))
-                done = d is not None and d >= self._creep_m_actual
+                done = d is not None and \
+                    d >= self._creep_m_actual + self.p["exit_margin_m"]
             if done:
                 self._park_enter("EXIT_TURN", now, self._trusted_pose(sensors))
 

@@ -20,6 +20,7 @@ FRAME_HEIGHT = 480
 FRONT_CAMERA_ROTATE = None  # None | "CW" | "CCW" | "180"
 
 LOOP_HZ = 30             # 메인 제어 루프 주기
+POSE_STALE_S = 0.5       # 이 시간 이상 /car/pose 갱신 없으면 pose_conf 강제 0 (odometry_node 중단 감시)
 
 DRIVE_SPEED = 100        # 기본 주행 속도 (-255..255, 실차 검증값)
 SLOW_SPEED = 60          # 주차 등 저속 기동 속도
