@@ -130,10 +130,12 @@ ros2 run autodrive_skku_ros mission_node
 |------|------|
 | `mission:={road,traffic,t_parking,test}` (`run_mission:=true`면 필수) | [미션 상세](#미션-상세) 참고 |
 | `run_mission:=false` | `mission_node` 없이 센서/액추에이터 노드만 기동 — [5단계](#5단계-수동-조작으로-구동-확인) 참고 |
+| `run_arduino:=false` | 기본 `true` — `arduino_node` 없이 기동해 모터를 전혀 안 움직이게 함. `mission_node`가 계산해 `/car/cmd/steer` 등에 발행하는 값을 `ros2 topic echo`로만 안전하게 관찰(검출 로직 검증)하고 싶을 때 |
+| `run_lidar:=false` | 기본 `true` — `rplidar`/`lidar_node` 없이 기동. 라이다 연결이 불안정할 때, 순수 카메라 기반 검출만 볼 때 |
 | `arduino_port:=/dev/ttyACM0` | 아두이노 포트 (기본: 자동 감지) |
 | `lidar_port:=/dev/ttyUSB0` | 라이다 포트 (기본: 자동 감지) |
-| `front_camera:=0` | 전방 카메라 인덱스 |
-| `rear_camera:=2` | 후방 카메라 인덱스 (T주차용, `-1`이면 미사용) |
+| `front_camera:=0` | 전방 카메라 인덱스 (기본: 이름(C920)으로 자동 감지 — USB 재열거로 다른 카메라와 섞여 순서가 틀리면 직접 지정. `ls /dev/video*` + `v4l2-ctl --list-devices`로 확인) |
+| `rear_camera:=2` | 후방 카메라 인덱스 (T주차용, `-1`이면 미사용 — C920 2대 이상 감지되면 두 번째를 자동 사용) |
 | `show:=true` | 카메라 창 표시 (`q`로 종료, 디스플레이 있는 환경 한정) |
 | `foxglove_port:=8765` | [Foxglove 모니터링](#7단계-foxglove-모니터링) WebSocket 포트 |
 | `calibrate_steering:=false` | 기본 `true` — 조향 POT 좌/우 풀락 자동 탐색(바퀴가 몇 초간 실제로 움직임, POT 미장착이면 자동 스킵). [조향 POT 자동 캘리브레이션](#조향-pot-자동-캘리브레이션-선택-하드웨어) 참고 |
@@ -385,7 +387,7 @@ python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 | `/dev/ttyUSB0` permission denied | `./setup.sh`가 dialout 그룹에 추가함 — **재로그인** 필요 |
 | `could not open port ...: Device or resource busy` | 다른 프로세스가 이미 그 포트를 잡고 있음 — `screen`으로 시리얼 모니터링하다 안 끄고 나갔을 때 흔함(`screen -ls`로 남은 세션 확인 후 `screen -X -S <세션> quit`, 또는 `fuser`/`lsof /dev/ttyACM*`로 PID 찾아서 `kill`) |
 | `/dev/ttyACM0`이 없다고 나옴(`ls`했을 때 안 보임) | 아두이노가 `/dev/ttyACM1` 등 다른 번호로 잡혔을 수 있음(연결 순서에 따라 바뀜) — `ls /dev/ttyACM* /dev/ttyUSB*`로 실제 번호 확인 후 `arduino_port:=`로 직접 지정 |
-| 카메라 열기 실패 | 다른 프로그램이 점유 중인지 확인, WSL2면 [usbipd attach](#2단계-wsl2에서-실행-usb-연결) |
+| 카메라 열기 실패 (`VIDIOC_REQBUFS`, `can't open camera by index` 등) | 다른 프로그램이 점유 중인지 확인, WSL2면 [usbipd attach](#2단계-wsl2에서-실행-usb-연결). 그게 아니면 `front_camera` 기본값(자동 감지)이 다른 웹캠을 잘못 골랐을 수 있음(2026-07-17 실차: 내장/타사 웹캠이 `/dev/video0`을 먼저 차지) — `ls /dev/video*` + `v4l2-ctl --list-devices`로 실제 C920 인덱스 확인 후 `front_camera:=<번호>`로 직접 지정 |
 | 아두이노/라이다 포트 뒤바뀜 | `arduino_port:=`/`lidar_port:=` launch 인자로 직접 지정 |
 | 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `teleop_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `teleop_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |
 | 조향이 계속 한쪽으로 감 | 펄스 방식이라 자동 복원 안 됨 — 반대 방향 펄스로 복귀 필요. POT이 달려 있으면 기동할 때마다 자동으로 중앙 복귀됨 |
