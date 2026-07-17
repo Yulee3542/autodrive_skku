@@ -352,7 +352,9 @@ def ros_main(args=None):
                 if self._adc_left is None:
                     self.get_logger().warn("조향 POT 미검출 — 캘리브레이션 없이 펄스 방식으로 동작")
                 else:
-                    self._adc_span = abs(self._adc_left - self._adc_right)
+                    # calibrate_steering()은 여러 샘플 평균(float)을 반환 —
+                    # Int32는 진짜 int만 받으므로(std_msgs 타입 assert) 반올림.
+                    self._adc_span = int(round(abs(self._adc_left - self._adc_right)))
 
         def _on_go(self, _msg):
             self._car.go()
@@ -531,6 +533,17 @@ def selftest():
     adc_left3, adc_right3 = narrow_car.calibrate_steering(settle_s=0, pot_timeout_s=0.2)
     check("좁은 실측 범위(ADC 4카운트)도 기본 파라미터로 캘리브레이션됨(스킵 안 됨)",
           adc_left3 is not None and adc_right3 is not None)
+
+    # 2026-07-17 실차 회귀: calibrate_steering()은 float(샘플 평균)를 반환하므로
+    # abs(adc_left-adc_right)도 float — ArduinoBridgeNode._publish_state()가 이걸
+    # 그대로 Int32(data=...)에 넣으면 std_msgs 타입 assert로 죽는다(POT이 실제로
+    # 검출된 최초 실행에서만 이 경로를 타서 그동안 안 잡혔음). int(round(...))로
+    # 감싸야 한다는 계약을 여기서 고정한다.
+    check("calibrate_steering() 반환값은 float(샘플 평균) — Int32 발행 전 캐스팅 필요",
+          isinstance(adc_left3, float) and isinstance(adc_right3, float))
+    span_for_publish = int(round(abs(adc_left3 - adc_right3)))
+    check("int(round(...)) 캐스팅 후에는 진짜 int (Int32에 안전하게 발행 가능)",
+          type(span_for_publish) is int)
 
     passed = sum(1 for _, ok in checks if ok)
     print(f"{passed}/{len(checks)} 통과")
