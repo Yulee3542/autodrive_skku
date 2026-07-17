@@ -22,6 +22,21 @@ try:
 except ImportError:
     serial = None
 
+# 출발/정지 속도 램프 시간(초) — 선배 조언(2026-07-17): control단 마지막
+# 단계(실제 전송 직전)에 Cubic Polynomial Trajectory를 적용해 급가속/급정지로
+# 인한 휠슬립·드리프트를 완화한다. 📏 실차 튜닝 대상.
+SPEED_RAMP_S = 0.5
+
+
+def cubic_trajectory(t, duration, v0, v1):
+    """Cubic Polynomial Trajectory — 경계조건 x(0)=v0, x(T)=v1, ẋ(0)=ẋ(T)=0
+    (양끝 가속도 0)을 만족하는 3차 다항식 속도 보간. t<=0이면 v0, t>=duration이면
+    v1로 클램프. duration<=0이면 즉시 v1(램프 없음)."""
+    if duration <= 0:
+        return v1
+    s = max(0.0, min(1.0, t / duration))
+    return v0 + (v1 - v0) * (3 * s * s - 2 * s * s * s)
+
 
 class ArduinoNode:
     """아두이노 시리얼 링크. 프로토콜은 README '시리얼 프로토콜' 절 참고.
@@ -38,7 +53,10 @@ class ArduinoNode:
         self.state = None  # 0 정지 / 1 전진 / 2 후진
         self.pot_adc = None  # 조향 POT 원시값(A6, 0~1023) — 펌웨어가 항상 보냄
         self._ser = None
-        self._speed = 0
+        self._speed = 0            # 마지막으로 실제 전송한 값(램프 진행 중 포함)
+        self._speed_target = 0     # drive()가 지정한 목표 속도
+        self._speed_ramp_from = 0  # 현재 램프 시작점(목표 변경 시점의 _speed)
+        self._speed_ramp_t0 = 0.0  # 램프 시작 시각(time.time())
         self._last = {}
         self._lock = threading.Lock()
         self._running = False
@@ -66,6 +84,7 @@ class ArduinoNode:
         while self._running:
             now = time.time()
             if now - last_keepalive >= 0.2:
+                self._speed = self._ramped_speed(now)
                 self._write(f"V{self._speed}\n")
                 last_keepalive = now
             try:
@@ -100,8 +119,24 @@ class ArduinoNode:
         self._send_once("gate", "G")
 
     def drive(self, speed):
-        """부호 있는 속도 지정. 음수 = 후진. 실제 전송은 keepalive가 담당."""
-        self._speed = max(-255, min(255, int(speed)))
+        """부호 있는 속도 목표 지정. 음수 = 후진. 실제 전송(keepalive)은 이
+        목표까지 Cubic Polynomial Trajectory(SPEED_RAMP_S초)로 부드럽게
+        램프한다 — 급가속/급정지로 인한 휠슬립·드리프트 완화. 같은 목표값
+        연속 호출은 램프를 재시작하지 않는다(미션이 매 틱 같은 속도로
+        drive()를 부르므로). 즉시 정지가 필요하면 stop()을 쓸 것 — 램프를
+        타지 않는다."""
+        target = max(-255, min(255, int(speed)))
+        if target != self._speed_target:
+            self._speed_ramp_from = self._speed
+            self._speed_ramp_t0 = time.time()
+            self._speed_target = target
+
+    def _ramped_speed(self, now):
+        if self._speed_target == self._speed_ramp_from:
+            return self._speed_target
+        value = cubic_trajectory(now - self._speed_ramp_t0, SPEED_RAMP_S,
+                                 self._speed_ramp_from, self._speed_target)
+        return int(round(value))
 
     def steer(self, direction):
         """조향 (같은 방향 연속 호출은 무시). F=조향 모터 정지, L/R=한 펄스."""
@@ -114,7 +149,13 @@ class ArduinoNode:
             self._last["steer"] = direction
 
     def stop(self):
+        """즉시 정지 — 램프를 타지 않는다(안전 우선: 미션 종료/비상정지에서
+        Cubic Trajectory로 서서히 멈추면 위험). 램프 상태도 0으로 리셋해
+        다음 keepalive tick이 남은 램프를 이어서 재출발시키지 않게 한다."""
         self._speed = 0
+        self._speed_target = 0
+        self._speed_ramp_from = 0
+        self._speed_ramp_t0 = time.time()
         self._write("V0\n")
         self._send_once("gate", "S")
 
@@ -392,6 +433,38 @@ def selftest():
     car.stop()
     check("stop()은 속도를 0으로 리셋하고 V0/S를 전송",
           car._speed == 0 and writes == ["V0\n", "S"])
+
+    # ---- Cubic Polynomial Trajectory (속도 램프) ----
+    check("cubic_trajectory: t<=0 -> v0", cubic_trajectory(-1, 1.0, 0, 100) == 0)
+    check("cubic_trajectory: t>=duration -> v1", cubic_trajectory(2, 1.0, 0, 100) == 100)
+    check("cubic_trajectory: 중간(t=T/2) -> 정확히 중점(대칭 smoothstep)",
+          abs(cubic_trajectory(0.5, 1.0, 0, 100) - 50.0) < 1e-9)
+    check("cubic_trajectory: duration<=0 -> 즉시 v1(램프 없음)",
+          cubic_trajectory(0.0, 0.0, 0, 100) == 100)
+
+    ramp_car = ArduinoNode(port=None)
+    ramp_car._write = lambda text: None
+    t0 = time.time()
+    ramp_car.drive(200)
+    check("drive() 직후에도 _speed는 아직 안 바뀜(램프는 keepalive가 진행)",
+          ramp_car._speed == 0 and ramp_car._speed_target == 200)
+    check("램프 시작 직후(t~=0) 램프값은 시작점 근처",
+          ramp_car._ramped_speed(t0) == 0)
+    check("램프 절반 지점 -> 목표의 절반 근처",
+          abs(ramp_car._ramped_speed(t0 + SPEED_RAMP_S / 2) - 100) <= 1)
+    check("램프 완료 후 -> 목표값",
+          ramp_car._ramped_speed(t0 + SPEED_RAMP_S + 1) == 200)
+
+    same_t0 = ramp_car._speed_ramp_t0
+    ramp_car.drive(200)  # 같은 목표값 연속 호출 -> 램프 재시작 안 함(미션이 매 틱 호출)
+    check("같은 목표값 연속 drive() 호출은 램프를 재시작하지 않음",
+          ramp_car._speed_ramp_t0 == same_t0)
+
+    ramp_car._speed = 150  # keepalive가 램프 중간에 전송했다고 가정
+    ramp_car.stop()
+    check("stop()은 램프를 타지 않고 즉시 0 + 램프 상태도 리셋",
+          ramp_car._speed == 0 and ramp_car._speed_target == 0
+          and ramp_car._ramped_speed(time.time() + 10) == 0)
 
     check("adc_to_deg: 좌 최대", abs(adc_to_deg(460, 460, 352, 20, -20) - 20.0) < 1e-9)
     check("adc_to_deg: 우 최대", abs(adc_to_deg(352, 460, 352, 20, -20) + 20.0) < 1e-9)

@@ -340,6 +340,7 @@ ros2 param set /odometry_node camera_mount.height_m 0.52
 안전 장치:
 - **워치독**: `V` 명령 수신 후 500ms 이상 시리얼이 끊기면 자동 정지 (파이썬 쪽은 200ms마다 keepalive 전송)
 - `V`를 한 번도 받지 못하면 기존 `run_test_fixed.ino`처럼 G/2/S 수동 명령으로 동작 (구버전 호환)
+- **속도 램프(Cubic Polynomial Trajectory)**: `drive(speed)`가 지정한 목표 속도까지 `V` 값을 즉시 점프시키지 않고 `SPEED_RAMP_S`(기본 0.5초, `arduino_node.py`) 동안 3차 다항식으로 부드럽게 도달시킨다(급가속/급정지로 인한 휠슬립·드리프트 완화, 2026-07-17 도입). `stop()`은 이 램프를 타지 않고 즉시 정지 — 안전 우선. 실차 튜닝 시스템(`ros2 param set`)에는 아직 안 물려 있음(코드 상수 수정 후 재빌드 필요) — 다음 단계 후보.
 
 ### 조향 POT 자동 캘리브레이션 (선택 하드웨어)
 
