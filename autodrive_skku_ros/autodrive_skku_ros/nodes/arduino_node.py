@@ -7,15 +7,24 @@ keepalive 스레드 포함). ros_main()의 ArduinoBridgeNode가 이 클래스를
 dedup), /car/cmd/steer_pulse(String, 강제) 토픽을 구독해 대응 메서드를 호출하고
 /car/state(Int8)를 발행한다. 시리얼 프로토콜은 README '시리얼 프로토콜' 절 참고.
 
-조향 POT(가변저항, A6)이 장착돼 있으면 기동 시 1회 좌/우 풀락 ADC를 자동으로
-찾아(calibrate_steering) /car/steering_pot(Int32, raw ADC), /car/steering_angle
-(Float32, deg)로 발행한다. POT 미장착이면 자동으로 스킵되고 기존 펄스 방식
-그대로 동작 — 이 하드웨어는 선택사항이다.
+조향 POT(가변저항, A6)이 장착돼 있으면 /car/steering_pot(Int32, raw ADC)을
+발행하고, steering_adc_left/steering_adc_right 파라미터로 좌/우 풀락 ADC를
+고정값으로 넘기면 /car/steering_angle(Float32, deg)도 함께 발행한다.
+
+지도 교수 피드백(2026-07-18): 기동 시마다 좌/우 풀락을 스스로 펄스를 반복하며
+찾는 자동 탐색("yes/no 판정 루프")은 예측 불가능하고 바퀴가 매번 움직여
+바람직하지 않음 — 중앙 정렬은 하드웨어(텐션 스프링)로 유지하고, 좌/우 ADC는
+tools/hw_test.py --pot로 한 번 수동 측정해 launch 인자로 고정
+입력하는 방식으로 바꿨다. ArduinoNode.calibrate_steering()은 그 수동 측정
+도구가 호출하는 스윕 로직으로 남아있을 뿐, 노드 기동 경로에서는 더 이상
+자동으로 실행되지 않는다.
 
 오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.arduino_node --selftest
 """
 import threading
 import time
+
+from .. import filters
 
 try:
     import serial
@@ -60,6 +69,7 @@ class ArduinoNode:
         self._last = {}
         self._lock = threading.Lock()
         self._running = False
+        self._stop_after_ramp = False  # stop() 예약 — 램프가 0에 닿으면 keepalive가 S를 보냄
 
         if serial is None:
             print("[arduino] pyserial 미설치 — 차량 제어 없이 실행")
@@ -84,8 +94,7 @@ class ArduinoNode:
         while self._running:
             now = time.time()
             if now - last_keepalive >= 0.2:
-                self._speed = self._ramped_speed(now)
-                self._write(f"V{self._speed}\n")
+                self._keepalive_tick(now)
                 last_keepalive = now
             try:
                 line = self._ser.readline().decode("utf-8", errors="ignore").strip()
@@ -99,6 +108,17 @@ class ArduinoNode:
                     self.pot_adc = int(line[2:])
                 except ValueError:
                     pass
+
+    def _keepalive_tick(self, now):
+        """200ms keepalive 1스텝 — 목표 속도로 램프하며 V를 보내고, stop()이
+        예약한 "램프 완료 후 정지 게이트(S)"를 여기서 완수한다. _loop()
+        스레드 본문에서 분리해뒀다 — 포트 없는 오프라인 셀프테스트에서도
+        스레드 없이 직접 호출해 검증할 수 있다."""
+        self._speed = self._ramped_speed(now)
+        self._write(f"V{self._speed}\n")
+        if self._stop_after_ramp and self._speed == 0:
+            self._send_once("gate", "S")
+            self._stop_after_ramp = False
 
     def _write(self, text):
         if self._ser is None:
@@ -116,6 +136,7 @@ class ArduinoNode:
         self._last[key] = value
 
     def go(self):
+        self._stop_after_ramp = False  # 재출발 — 대기 중이던 정지 게이트 예약 취소
         self._send_once("gate", "G")
 
     def drive(self, speed):
@@ -123,13 +144,13 @@ class ArduinoNode:
         목표까지 Cubic Polynomial Trajectory(SPEED_RAMP_S초)로 부드럽게
         램프한다 — 급가속/급정지로 인한 휠슬립·드리프트 완화. 같은 목표값
         연속 호출은 램프를 재시작하지 않는다(미션이 매 틱 같은 속도로
-        drive()를 부르므로). 즉시 정지가 필요하면 stop()을 쓸 것 — 램프를
-        타지 않는다."""
+        drive()를 부르므로)."""
         target = max(-255, min(255, int(speed)))
         if target != self._speed_target:
             self._speed_ramp_from = self._speed
             self._speed_ramp_t0 = time.time()
             self._speed_target = target
+        self._stop_after_ramp = False  # 정상 주행 재개 — 대기 중이던 정지 게이트 예약 취소
 
     def _ramped_speed(self, now):
         if self._speed_target == self._speed_ramp_from:
@@ -149,18 +170,40 @@ class ArduinoNode:
             self._last["steer"] = direction
 
     def stop(self):
-        """즉시 정지 — 램프를 타지 않는다(안전 우선: 미션 종료/비상정지에서
-        Cubic Trajectory로 서서히 멈추면 위험). 램프 상태도 0으로 리셋해
-        다음 keepalive tick이 남은 램프를 이어서 재출발시키지 않게 한다."""
+        """정지(비상정지 포함) — drive(0)과 동일한 Cubic Polynomial Trajectory로
+        목표 속도 0까지 부드럽게 램프하고, 램프가 실제로 0에 도달하면(다음
+        keepalive 틱에서 _keepalive_tick이 감지) 정지 게이트(S)를 보내
+        canGo를 내린다.
+
+        2026-07-18 변경: 기존에는 V0+S를 즉시 동기 전송해 한 틱만에 완전
+        정지시켰다("안전 우선"). 그런데 이 즉시 컷이 오히려 급제동/휠슬립을
+        유발한다는 지적으로, 비상정지에도 정상 주행 속도 변경과 동일한
+        램프를 적용하도록 바꿨다 — 시리얼 워치독(500ms, 통신 두절 시 자동
+        정지)이 여전히 최종 안전망이라 램프 도중 통신이 끊겨도 무한정
+        폭주하지 않는다. 프로세스 자체가 죽는 진짜 즉시 정지(SIGINT/SIGTERM/
+        노드 종료)는 스레드의 다음 keepalive 틱을 기다릴 여유가 없으므로
+        close()가 _hard_stop()을 따로 쓴다."""
+        if self._speed_target != 0:
+            self._speed_ramp_from = self._speed
+            self._speed_ramp_t0 = time.time()
+        self._speed_target = 0
+        self._stop_after_ramp = True
+
+    def _hard_stop(self):
+        """램프 없이 즉시 정지 — close() 전용(프로세스 종료/SIGINT/SIGTERM).
+        스레드의 다음 keepalive 틱을 기다릴 여유가 없는 상황이라 V0/S를
+        동기로 직접 전송하고, 램프 상태도 리셋해 이후 재연결/재시작 시 남은
+        램프가 이어지지 않게 한다."""
         self._speed = 0
         self._speed_target = 0
         self._speed_ramp_from = 0
         self._speed_ramp_t0 = time.time()
+        self._stop_after_ramp = False
         self._write("V0\n")
         self._send_once("gate", "S")
 
     def close(self):
-        self.stop()
+        self._hard_stop()
         self._running = False
         time.sleep(0.1)
         if self._ser is not None:
@@ -189,6 +232,13 @@ class ArduinoNode:
                             stable_count=3, stable_tol=1, min_span=3,
                             recenter_tol=1, pot_timeout_s=2.0):
         """조향 POT 기준 좌/우 풀락 ADC를 실측하고, 중앙으로 복귀시킨 뒤 반환한다.
+
+        📏 노드 기동 시 자동으로는 호출되지 않는다(지도 교수 피드백, 2026-07-18) —
+        tools/hw_test.py --pot로 사람이 명시적으로 한 번 돌려 adc_left/
+        adc_right를 측정하고, 그 값을 steering_adc_left/steering_adc_right
+        launch 인자로 고정 입력하는 용도의 수동 측정 도구로만 남겨둔다. 매
+        기동마다 바퀴를 스스로 움직이며 좌/우를 탐색하는 방식은 예측 불가능해
+        바람직하지 않다는 지적 — 중앙 정렬은 하드웨어(텐션 스프링)가 담당한다.
 
         방향별로 steer_pulse()를 반복하면서, 최소 min_pulses는 무조건 채운
         뒤부터 ADC가 stable_count회 연속 stable_tol 이내로 안 바뀌면 기계적
@@ -285,6 +335,17 @@ def adc_to_deg(adc, adc_left, adc_right, angle_left_deg, angle_right_deg):
     return float(max(lo, min(hi, deg)))
 
 
+def filter_pot_adc(kf, raw_adc, q, r):
+    """조향 POT 라이브 스트림 1틱 필터 — ADC count 공간(adc_to_deg() 변환 이전)
+    에서 predict+update하고 필터링된 ADC(float)를 반환한다.
+
+    _read_pot_median()(캘리브레이션 스윕 전용, 여러 샘플의 중앙값)과 달리
+    이건 매 _publish_state 틱(LOOP_HZ)마다 도착하는 라이브 스트림용 —
+    filters.ScalarKalmanFilter(kf)를 노드가 틱 간 들고 있어야 한다."""
+    kf.predict(q)
+    return kf.update(float(raw_adc), r)
+
+
 # ============================ ROS2 래퍼 ============================
 
 def ros_main(args=None):
@@ -292,7 +353,7 @@ def ros_main(args=None):
     from rclpy.node import Node
     from std_msgs.msg import Empty, Int8, Int16, Int32, Float32, String
 
-    from .. import config
+    from .. import config, tuning
     from .ports import autodetect_ports
 
     class ArduinoBridgeNode(Node):
@@ -303,10 +364,13 @@ def ros_main(args=None):
         (go/stop/drive/steer/steer_pulse)를 그대로 호출한다. 시리얼 프로토콜·워치독·
         dedupe 로직은 ArduinoNode에 손대지 않고 그대로 재사용한다.
 
-        calibrate_steering 파라미터(기본 true)가 켜져 있으면 시작 시 1회
-        ArduinoNode.calibrate_steering()을 돌려 좌/우 풀락 ADC를 찾고,
-        그 결과로 /car/steering_pot(Int32)·/car/steering_angle(Float32)를
-        계속 발행한다. POT 미장착이면 자동으로 조용히 스킵된다.
+        steering_adc_left/steering_adc_right 파라미터(기본 0.0=미설정)로 좌/우
+        풀락 ADC를 고정값으로 넘기면, 기동 시 스윕 없이 그 값을 그대로 써서
+        /car/steering_pot(Int32)·/car/steering_angle(Float32)을 계속 발행한다.
+        값을 재보려면 tools/hw_test.py --pot로 별도 수동 측정할 것
+        (지도 교수 피드백, 2026-07-18: 기동 시마다 자동으로 좌/우를 탐색하는
+        방식은 바퀴가 예측 없이 움직여 바람직하지 않음 — 중앙 정렬은 하드웨어
+        텐션 스프링이 담당).
         """
 
         def __init__(self):
@@ -314,7 +378,13 @@ def ros_main(args=None):
 
             self.declare_parameter("port", "")
             self.declare_parameter("baud", config.ARDUINO_BAUD)
-            self.declare_parameter("calibrate_steering", True)
+            # 좌/우 풀락 ADC 고정값 — tools/hw_test.py --pot로 미리
+            # 수동 측정해서 넘긴다. 0.0(둘 다 미설정 또는 동일)이면 "측정 안 됨"
+            # 취급으로 /car/steering_angle을 발행하지 않고 /car/steering_pot
+            # (raw ADC)만 내보낸다 — 기동 시 자동 스윕은 하지 않는다(지도 교수
+            # 피드백, 2026-07-18).
+            self.declare_parameter("steering_adc_left", 0.0)
+            self.declare_parameter("steering_adc_right", 0.0)
 
             port = self.get_parameter("port").value or None
             if port is None:
@@ -323,14 +393,7 @@ def ros_main(args=None):
 
             self._car = ArduinoNode(port, baud)
 
-            # 구독/발행/타이머를 먼저 등록한다 — calibrate_steering()이 최대
-            # 수 초간 블로킹하는 동안(2026-07-17 실차 로그: ~4초), mission_node는
-            # 별도 프로세스라 이미 on_start()에서 car.go()/car.drive()를 (한 번만)
-            # 발행해버릴 수 있다. 구독이 나중에 생기면 기본 QoS(VOLATILE)라
-            # 그 사이 도착한 메시지는 유실되고 — go/drive를 반복 호출하지 않는
-            # 미션(road 등)에서는 차가 조향만 되고 영원히 안 움직이는 버그가
-            # 됐었다. DDS 레벨에서는 구독 등록만 되면(콜백은 spin() 시작 후 처리)
-            # 큐잉되므로, 블로킹 작업 전에 구독부터 만들면 메시지가 안 유실된다.
+            # 구독/발행/타이머 등록.
             self.create_subscription(Empty, "/car/cmd/go", self._on_go, 10)
             self.create_subscription(Empty, "/car/cmd/stop", self._on_stop, 10)
             self.create_subscription(Int16, "/car/cmd/drive", self._on_drive, 10)
@@ -349,18 +412,27 @@ def ros_main(args=None):
             self._span_pub = self.create_publisher(Int32, "/car/steering_pot_span", 10)
             self.create_timer(1.0 / config.LOOP_HZ, self._publish_state)
 
+            # 라이브 조향 POT 스트림 칼만필터 (ADC count 공간) — 실차에서
+            # rebuild 없이 Q/R을 ros2 param set으로 튜닝할 수 있게 노출한다.
+            self._pot_kf = filters.ScalarKalmanFilter()
+            tuning.install(self, tuning.arduino_tunable_dicts())
+
             self._adc_left = None
             self._adc_right = None
             self._adc_span = None
-            if self.get_parameter("calibrate_steering").value:
-                self.get_logger().info("조향 캘리브레이션 시작 (좌/우 풀락 탐색)...")
-                self._adc_left, self._adc_right = self._car.calibrate_steering()
-                if self._adc_left is None:
-                    self.get_logger().warn("조향 POT 미검출 — 캘리브레이션 없이 펄스 방식으로 동작")
-                else:
-                    # calibrate_steering()은 여러 샘플 평균(float)을 반환 —
-                    # Int32는 진짜 int만 받으므로(std_msgs 타입 assert) 반올림.
-                    self._adc_span = int(round(abs(self._adc_left - self._adc_right)))
+            adc_left = self.get_parameter("steering_adc_left").value
+            adc_right = self.get_parameter("steering_adc_right").value
+            if adc_left and adc_right and adc_left != adc_right:
+                self._adc_left, self._adc_right = adc_left, adc_right
+                self._adc_span = int(round(abs(adc_left - adc_right)))
+                self.get_logger().info(
+                    f"조향 POT 고정 캘리브레이션: adc_left={adc_left}, "
+                    f"adc_right={adc_right} (기동 시 자동 탐색 없음)")
+            else:
+                self.get_logger().info(
+                    "steering_adc_left/right 미설정 — /car/steering_angle 발행 안 함 "
+                    "(/car/steering_pot의 raw ADC만 발행). tools/hw_test.py "
+                    "--pot로 측정 후 launch 인자로 넘길 것.")
 
         def _on_go(self, _msg):
             self._car.go()
@@ -384,9 +456,12 @@ def ros_main(args=None):
             adc = self._car.pot_adc
             if adc is None:
                 return
-            self._pot_pub.publish(Int32(data=adc))
+            self._pot_pub.publish(Int32(data=adc))  # 원시 ADC는 그대로 발행(기존 계약 불변)
             if self._adc_left is not None:
-                deg = adc_to_deg(adc, self._adc_left, self._adc_right,
+                filtered_adc = filter_pot_adc(
+                    self._pot_kf, adc, config.ARDUINO_STEERING["kf_process_noise"],
+                    config.ARDUINO_STEERING["kf_measurement_noise"])
+                deg = adc_to_deg(filtered_adc, self._adc_left, self._adc_right,
                                   config.STEERING_LIMIT_DEG, -config.STEERING_LIMIT_DEG)
                 self._angle_pub.publish(Float32(data=deg))
                 self._span_pub.publish(Int32(data=self._adc_span))
@@ -446,9 +521,36 @@ def selftest():
 
     writes.clear()
     car._speed = 80
+    car._speed_target = 80
     car.stop()
-    check("stop()은 속도를 0으로 리셋하고 V0/S를 전송",
-          car._speed == 0 and writes == ["V0\n", "S"])
+    check("stop()은 즉시 쓰지 않고 목표 속도 0 + 정지 게이트 예약만 함(램프는 keepalive가 진행)",
+          writes == [] and car._speed_target == 0 and car._stop_after_ramp)
+
+    stop_t0 = time.time()
+    car._keepalive_tick(stop_t0)
+    check("stop() 직후 첫 keepalive 틱은 아직 램프 시작점 근처 (즉시 0 아님, S도 아직 안 감)",
+          car._speed != 0 and "S" not in writes)
+    car._keepalive_tick(stop_t0 + SPEED_RAMP_S + 1)
+    check("램프가 실제로 0에 도달한 keepalive 틱에서 V0 + 정지 게이트(S) 전송",
+          car._speed == 0 and not car._stop_after_ramp and writes[-2:] == ["V0\n", "S"])
+
+    writes.clear()
+    car.drive(50)
+    car.stop()
+    car.drive(80)  # 램프 도중 다시 drive() -> 예약된 정지 게이트는 취소돼야 함
+    for _ in range(10):
+        car._keepalive_tick(time.time() + SPEED_RAMP_S + 1)
+    check("stop() 이후 drive()가 오면 예약된 정지 게이트(S)를 취소",
+          not car._stop_after_ramp and "S" not in writes)
+
+    writes.clear()
+    hard_car = ArduinoNode(port=None)
+    hard_car._write = lambda text: writes.append(text)
+    hard_car._speed = 80
+    hard_car._speed_target = 80
+    hard_car._hard_stop()
+    check("_hard_stop()(close() 전용)은 램프 없이 즉시 V0/S 전송",
+          hard_car._speed == 0 and hard_car._speed_target == 0 and writes == ["V0\n", "S"])
 
     # ---- Cubic Polynomial Trajectory (속도 램프) ----
     check("cubic_trajectory: t<=0 -> v0", cubic_trajectory(-1, 1.0, 0, 100) == 0)
@@ -478,9 +580,28 @@ def selftest():
 
     ramp_car._speed = 150  # keepalive가 램프 중간에 전송했다고 가정
     ramp_car.stop()
-    check("stop()은 램프를 타지 않고 즉시 0 + 램프 상태도 리셋",
-          ramp_car._speed == 0 and ramp_car._speed_target == 0
+    check("stop() 호출 직후에는 목표만 0으로 바뀌고 현재 _speed는 아직 그대로(램프 진행 중)",
+          ramp_car._speed == 150 and ramp_car._speed_target == 0
           and ramp_car._ramped_speed(time.time() + 10) == 0)
+
+    # ---- filter_pot_adc (라이브 POT 스트림 칼만필터) ----
+    pot_kf = filters.ScalarKalmanFilter()
+    q, r = 1.0, 4.0
+    v = filter_pot_adc(pot_kf, 400, q, r)
+    check("filter_pot_adc: 첫 틱은 원시 ADC로 직접 초기화", v == 400.0)
+    for _ in range(20):
+        v = filter_pot_adc(pot_kf, 420, q, r)
+    check("filter_pot_adc: 같은 값 반복 -> 새 값(420)에 수렴", abs(v - 420.0) < 1.0)
+
+    spike_kf = filters.ScalarKalmanFilter()
+    for _ in range(10):
+        filter_pot_adc(spike_kf, 349, q, r)  # 정상값에서 안정된 상태 시뮬
+    spiked = filter_pot_adc(spike_kf, 356, q, r)  # 조향 모터 노이즈로 한 틱만 튐(_read_pot_median 문서화 시나리오)
+    check("filter_pot_adc: 한 틱짜리 스파이크(349->356)는 356까지 안 튀고 감쇠됨",
+          349.0 < spiked < 356.0)
+    settled = filter_pot_adc(spike_kf, 349, q, r)  # 스파이크 이후 원래 값으로 복귀
+    check("filter_pot_adc: 스파이크 이후 원래 값(349) 복귀 시 다시 349 근처로",
+          abs(settled - 349.0) < 3.0)
 
     check("adc_to_deg: 좌 최대", abs(adc_to_deg(460, 460, 352, 20, -20) - 20.0) < 1e-9)
     check("adc_to_deg: 우 최대", abs(adc_to_deg(352, 460, 352, 20, -20) + 20.0) < 1e-9)

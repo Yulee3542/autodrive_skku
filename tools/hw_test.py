@@ -57,11 +57,14 @@ def test_steer(car, pulse_gap_s):
 
 
 def test_pot(car):
-    """조향 POT 캘리브레이션 span 진단 — ArduinoNode.calibrate_steering()을
-    그대로 호출해(자동 좌/우 풀락 스윕 + 중앙값 필터, 새 로직 없음) span을
-    config.ODOMETRY.min_pot_span_counts(odometry_node가 POT 각도를 신뢰할
-    최소 기준)와 비교해 경고를 출력한다."""
-    print("\n### [pot] 조향 POT 캘리브레이션 span 진단 — 좌/우 풀락 자동 스윕 중...")
+    """조향 POT 좌/우 풀락 ADC를 수동으로 1회 측정한다 — ArduinoNode.calibrate_steering()
+    (자동 좌/우 풀락 스윕 + 중앙값 필터)을 사람이 직접 실행할 때만 호출한다.
+
+    지도 교수 피드백(2026-07-18)에 따라 arduino_node는 더 이상 기동 시마다
+    이 스윕을 자동으로 돌리지 않는다(중앙 정렬은 하드웨어 텐션 스프링이 담당).
+    이 스크립트로 한 번 측정해 나온 adc_left/adc_right를 bringup.launch.py의
+    steering_adc_left/steering_adc_right 인자로 고정 입력해 재사용할 것."""
+    print("\n### [pot] 조향 POT 좌/우 풀락 수동 측정 — 좌/우 풀락 스윕 중...")
     adc_left, adc_right = car.calibrate_steering()
     if adc_left is None:
         print("  -> POT 미검출/응답 없음 — 미장착이거나 배선(A6/기준전압) 문제로 추정")
@@ -76,6 +79,8 @@ def test_pot(car):
         print("     이대로면 각도 해상도가 부족해 odometry_node가 펄스 폴백으로 동작합니다")
     else:
         print("  span 양호 — odometry_node가 POT 각도를 신뢰해 사용합니다")
+        print(f"  -> bringup.launch.py에 고정 입력: "
+              f"steering_adc_left:={adc_left} steering_adc_right:={adc_right}")
 
 
 def build_parser():

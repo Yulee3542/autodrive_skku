@@ -74,6 +74,13 @@ def odometry_tunable_dicts():
     }
 
 
+def arduino_tunable_dicts():
+    """arduino_bridge_node가 노출할 dict — 라이브 조향 POT 스트림 칼만필터
+    Q/R(config.ARDUINO_STEERING). calibrate_steering()의 중앙값 스윕과는
+    무관 — /car/steering_angle 라이브 발행 경로만 튜닝한다."""
+    return {"steering": config.ARDUINO_STEERING}
+
+
 def lidar_tunable_dicts():
     """lidar_node(lidar_geometry_node)가 노출할 dict."""
     return {"lidar_mount": config.LIDAR_MOUNT}

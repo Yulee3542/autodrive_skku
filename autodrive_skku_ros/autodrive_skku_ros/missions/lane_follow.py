@@ -1,5 +1,7 @@
 import math
 
+from .. import filters
+
 try:
     from ..vendor import Function_Library as fl
 except ImportError:  # 패키지 미설치 개발 환경 — 차선 인식 없이 골격만 동작
@@ -73,7 +75,14 @@ LANE_POI = dict(
     near_weight_decay=0.6,      # 밴드별 목표점 가중 평균 시 먼 밴드일수록 이 비율로 감쇠
     trapezoid_near_half_frac=0.50,  # 가장 가까운 밴드: 중앙 기준 ±50%(=전체 폭)
     trapezoid_far_half_frac=0.22,   # 가장 먼 밴드: 중앙 기준 ±22%로 좁힘
-    smoothing_alpha=0.3,        # 프레임 간 스무딩(EMA) 반영 비율
+    # ---- 프레임 간 스무딩: 칼만필터(filters.ScalarKalmanFilter, 2026-07-18
+    # EMA에서 전환) — 매 프레임 raw_target을 측정으로 삼아 predict+update한다.
+    # kf_process_noise(Q)가 클수록 최근 측정을 더 빨리 따라가고(반응성↑),
+    # kf_measurement_noise(R)가 클수록 한 프레임의 튐을 더 무시한다(안정성↑).
+    kf_process_noise=4.0,        # px^2/tick — 밴드 목표점 자체의 프레임 간 변화 허용
+    kf_measurement_noise=15.0,   # px^2 — 한 프레임 raw_target 측정의 노이즈 분산 📏
+    kf_max_variance_px=None,     # px^2 — 이 이상 불확실해지면 추정 폐기(None=비활성,
+                                  # 기존처럼 미검출 프레임에도 마지막 조향을 무기한 유지)
     # ---- 곡선 구간용 Circular Hough Transform 보정 (2026-07-17, 교수님 제안) ----
     # POI 전체를 한 번 이진화해 cv2.HoughCircles로 차선을 근사하는 원을 찾고,
     # 기존 밴드 타겟과 hough_min_inlier_bands개 이상 일치할 때만 그 원 위의
@@ -254,14 +263,30 @@ def _circle_x_at_y(cx, cy, r, y, prefer_x):
 
 
 class LaneCenterTracker:
-    """follow_lane_poi()의 프레임 간 스무딩 상태(EMA)를 들고 있는 객체 --
-    미션 on_start()에서 하나 만들어 매 틱 재사용한다."""
+    """follow_lane_poi()의 프레임 간 스무딩 상태(filters.ScalarKalmanFilter)를
+    들고 있는 객체 -- 미션 on_start()에서 하나 만들어 매 틱 재사용한다.
+    .smoothed는 기존 호출부(road.py/t_parking.py/debug_viz.py) 호환을 위해
+    유지하는 읽기전용 별칭이다."""
 
     def __init__(self):
-        self.smoothed = None
+        self.kf = filters.ScalarKalmanFilter()
 
     def reset(self):
-        self.smoothed = None
+        self.kf = filters.ScalarKalmanFilter()
+
+    @property
+    def smoothed(self):
+        return self.kf.value()
+
+    def update(self, raw_target, process_noise, measurement_noise):
+        """raw_target이 있으면 predict+update, None이면 predict만(측정 없음 —
+        추정값은 유지하고 분산만 커진다. 기존 EMA는 이 경우 아예 갱신을 안 해
+        "얼마나 오래됐는지"에 대한 정보가 없었다). 반환: 갱신 후 추정값
+        (아직 한 번도 초기화 안 됐으면 None)."""
+        self.kf.predict(process_noise)
+        if raw_target is not None:
+            self.kf.update(raw_target, measurement_noise)
+        return self.kf.value()
 
 
 def analyze_lane_poi(frame, config=LANE_POI):
@@ -360,17 +385,17 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI):
         details = analyze_lane_poi(frame, config)
         if details is None:
             return None
-        details.update(smoothed=tracker.smoothed, offset=None, direction=None,
+        smoothed = tracker.update(details["raw_target"],
+                                  config["kf_process_noise"], config["kf_measurement_noise"])
+        variance = tracker.kf.variance()
+        details.update(smoothed=smoothed, variance=variance, offset=None, direction=None,
                        deadzone=config["center_deadzone_px"],
                        roi_frac=config["roi_frac"])
-        if details["raw_target"] is None:
-            return details  # 이전 조향 유지 (smoothed는 직전 값 그대로)
+        max_var = config["kf_max_variance_px"]
+        if smoothed is None or (max_var is not None and variance > max_var):
+            return details  # 추정 불가/미검출 또는 너무 불확실 -> 이전 조향 유지
 
-        alpha = config["smoothing_alpha"]
-        tracker.smoothed = details["raw_target"] if tracker.smoothed is None else (
-            (1 - alpha) * tracker.smoothed + alpha * details["raw_target"])
-
-        offset = tracker.smoothed - details["cx"]
+        offset = smoothed - details["cx"]
         deadzone = config["center_deadzone_px"]
         if offset > deadzone:
             direction = "R"
@@ -379,7 +404,7 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI):
         else:
             direction = "F"
         car.steer(direction)
-        details.update(smoothed=tracker.smoothed, offset=offset, direction=direction)
+        details.update(smoothed=smoothed, offset=offset, direction=direction)
         return details
     except Exception as e:
         print(f"[lane_follow] follow_lane_poi 실패, 이번 프레임 스킵: {e}")

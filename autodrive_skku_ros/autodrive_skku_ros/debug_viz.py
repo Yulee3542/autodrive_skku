@@ -1,5 +1,9 @@
 """감지기 분석 결과를 프레임에 그려주는 디버그 오버레이 (Foxglove /debug/* 용).
 
+lane_poi/parking_line 오버레이는 raw 측정(얇은 주황선)과 칼만필터로 스무딩된
+추정(굵은 빨간선)을 함께 그린다 — sigma(sqrt(variance))도 텍스트로 표시해
+실차 튜닝 중 필터가 얼마나 흔들리는지/수렴했는지 한눈에 보이게 한다.
+
 prototypes/lane_center_poi_windows_test.py의 시각화(밴드 사각형/클러스터 경계선/
 목표점/경로 폴리라인/사다리꼴 외곽/스무딩 라인)를 ROS 포팅판에 맞게 옮긴 것.
 mission_node의 오버레이 타이머가 Mission.debug 스크래치를 읽어 여기 함수들로
@@ -69,15 +73,22 @@ def draw_lane_poi(frame, details):
         cv2.line(vis, (int(cx - deadzone), roi_y), (int(cx - deadzone), h), (100, 100, 100), 1)
         cv2.line(vis, (int(cx + deadzone), roi_y), (int(cx + deadzone), h), (100, 100, 100), 1)
 
-    # 스무딩된 조향 목표(굵은 빨간 세로선) + 상태 텍스트
-    smoothed = details.get("smoothed")
+    # raw_target(얇은 주황 세로선) + 칼만필터로 스무딩된 조향 목표(굵은 빨간
+    # 세로선) + 상태 텍스트(오프셋/방향/sigma)
     roi_top_y = int(h * details.get("roi_frac", (0.67, 0.98))[0])
+    raw_target = details.get("raw_target")
+    if raw_target is not None:
+        cv2.line(vis, (int(raw_target), roi_top_y), (int(raw_target), h), _ORANGE, 1)
+
+    smoothed = details.get("smoothed")
     if smoothed is not None:
         cv2.line(vis, (int(smoothed), roi_top_y), (int(smoothed), h), _RED, 3)
         offset = details.get("offset")
         direction = details.get("direction")
+        variance = details.get("variance")
+        sigma = f" sigma={variance ** 0.5:.1f}px" if variance is not None else ""
         text = (f"offset={offset:+.0f}px dir={direction} " if offset is not None
-                else "held ") + f"pts={len(pts)}/{len(bands)}"
+                else "held ") + f"pts={len(pts)}/{len(bands)}{sigma}"
         cv2.putText(vis, text, (5, max(roi_top_y - 8, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, _RED, 1)
     else:
@@ -157,10 +168,16 @@ def draw_parking_line(frame, dbg):
         cv2.line(vis, (int(cx + tol), roi_y0), (int(cx + tol), h), (100, 100, 100), 1)
     for c in dbg.get("clusters", []):
         cv2.line(vis, (int(c), roi_y0), (int(c), h), _GREEN, 2)
+    # raw_err 위치(얇은 주황선)와 칼만필터로 스무딩된 err(굵은 빨간선)를 함께 표시
+    raw_err = dbg.get("raw_err")
+    if raw_err is not None:
+        cv2.line(vis, (int(cx + raw_err), roi_y0), (int(cx + raw_err), h), _ORANGE, 1)
     mid = dbg.get("mid")
     if mid is not None:
         cv2.line(vis, (int(mid), roi_y0), (int(mid), h), _RED, 3)
-        cv2.putText(vis, f"err={dbg['err']:+.0f}px steer={dbg['steer']}",
+        variance = dbg.get("variance")
+        sigma = f" sigma={variance ** 0.5:.1f}px" if variance is not None else ""
+        cv2.putText(vis, f"err={dbg['err']:+.0f}px steer={dbg['steer']}{sigma}",
                     (5, max(roi_y0 - 6, 12)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, _RED, 1)
     else:
         cv2.putText(vis, f"lines={len(dbg.get('clusters', []))}<2 (hold)",

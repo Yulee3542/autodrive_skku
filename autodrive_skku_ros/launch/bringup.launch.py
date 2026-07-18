@@ -23,11 +23,18 @@ Foxglove의 Publish 패널로 /car/cmd/{go,stop,drive,steer}에 직접 명령을
 arduino_port/lidar_port를 생략하면 시리얼 포트를 자동 감지한다(기존
 tools/ports.py의 autodetect_ports()를 launch 생성 시점에 그대로 재사용).
 
-calibrate_steering:=true(기본값)면 arduino_node가 뜰 때 조향 POT(A6) 좌/우
-풀락을 자동으로 찾는다 — 바퀴가 몇 초간 실제로 좌우로 움직이니 반드시 바퀴를
-띄우거나 장애물 없는 곳에서 기동할 것. POT 미장착 차량이면 자동으로 스킵되므로
-평소엔 그냥 둬도 되고, 정말 바퀴를 못 움직이는 상황(예: 정비 중)에서만
-calibrate_steering:=false로 끌 것.
+steering_adc_left/steering_adc_right(기본 0.0=미설정)로 조향 POT(A6) 좌/우
+풀락 ADC를 고정값으로 넘기면 arduino_node가 /car/steering_angle을 발행한다.
+값은 미리 'python tools/hw_test.py --pot'로 한 번 수동 측정해서 넣을 것 —
+기동할 때마다 자동으로 좌/우를 탐색하며 바퀴를 움직이던 이전 방식은 지도
+교수 피드백(2026-07-18: 예측 불가능해 바람직하지 않음, 중앙 정렬은 하드웨어
+텐션 스프링이 담당)에 따라 없앴다. 미설정으로 두면 /car/steering_pot(raw
+ADC)만 발행되고 /car/steering_angle은 나오지 않는다(POT 미장착과 동일 취급).
+
+log_drive:=true(기본값)면 mission_node가 매 제어 틱마다 현재 튜닝값과
+조향/속도 명령을 타임스탬프와 함께 log_dir(기본 config.DRIVE_LOG_DIR) 아래
+JSON Lines 파일로 남긴다 — 디지털 트윈에서 주행을 재현하기 위한 로그
+(지도 교수 피드백, 2026-07-18). 끄려면 log_drive:=false.
 
 run_odometry:=true(기본값)면 odometry_node가 함께 뜬다 — VO(시각 오도메트리)와
 커맨드-적분(가짜 데드레커닝)을 융합해 /car/pose(PoseStamped, 상대 좌표),
@@ -119,11 +126,21 @@ def generate_launch_description():
                      "mission_node가 경고 후 자동으로 꺼짐, 2026-07-17 이전엔 "
                      "SSH/헤드리스에서 프로세스 전체가 죽었음)")
     foxglove_port_arg = DeclareLaunchArgument("foxglove_port", default_value="8765")
-    calibrate_steering_arg = DeclareLaunchArgument(
-        "calibrate_steering", default_value="true",
-        description="true면 arduino_node 기동 시 조향 POT 좌/우 풀락을 1회 자동 "
-                     "탐색(수 초 소요, 바퀴가 실제로 움직임). POT 미장착이면 "
-                     "자동으로 조용히 스킵됨. 바퀴를 못 띄운 상태 등에서는 false로.")
+    steering_adc_left_arg = DeclareLaunchArgument(
+        "steering_adc_left", default_value="0.0",
+        description="조향 POT 좌 풀락 ADC 고정값 — tools/hw_test.py --pot로 "
+                     "미리 수동 측정. 0.0(right와 동일)이면 미설정 취급으로 "
+                     "/car/steering_angle을 발행하지 않음.")
+    steering_adc_right_arg = DeclareLaunchArgument(
+        "steering_adc_right", default_value="0.0",
+        description="조향 POT 우 풀락 ADC 고정값 — steering_adc_left 참고.")
+    log_drive_arg = DeclareLaunchArgument(
+        "log_drive", default_value="true",
+        description="true면 mission_node가 매 틱 튜닝값+명령을 타임스탬프와 "
+                     "함께 log_dir 아래 JSON Lines로 기록 (디지털 트윈 재현용).")
+    log_dir_arg = DeclareLaunchArgument(
+        "log_dir", default_value="",
+        description="주행 로그 저장 디렉토리. 비우면 config.DRIVE_LOG_DIR 사용.")
     run_odometry_arg = DeclareLaunchArgument(
         "run_odometry", default_value="true",
         description="false면 odometry_node 없이 기동. config.CAMERA_MOUNT/"
@@ -141,8 +158,10 @@ def generate_launch_description():
         executable="arduino_node",
         parameters=[{
             "port": LaunchConfiguration("arduino_port"),
-            "calibrate_steering": ParameterValue(
-                LaunchConfiguration("calibrate_steering"), value_type=bool),
+            "steering_adc_left": ParameterValue(
+                LaunchConfiguration("steering_adc_left"), value_type=float),
+            "steering_adc_right": ParameterValue(
+                LaunchConfiguration("steering_adc_right"), value_type=float),
         }],
         condition=IfCondition(LaunchConfiguration("run_arduino")),
     )
@@ -195,6 +214,8 @@ def generate_launch_description():
             parameters=[{
                 "mission": LaunchConfiguration("mission"),
                 "show": ParameterValue(LaunchConfiguration("show"), value_type=bool),
+                "log_drive": ParameterValue(LaunchConfiguration("log_drive"), value_type=bool),
+                "log_dir": LaunchConfiguration("log_dir"),
             }] + extra,
             output="screen",
             emulate_tty=True,
@@ -214,7 +235,9 @@ def generate_launch_description():
         run_mission_arg, mission_arg, run_arduino_arg, run_lidar_arg,
         arduino_port_arg, lidar_port_arg,
         front_camera_arg, rear_camera_arg, show_arg, foxglove_port_arg,
-        calibrate_steering_arg, run_odometry_arg, tuning_params_arg,
+        steering_adc_left_arg, steering_adc_right_arg,
+        log_drive_arg, log_dir_arg,
+        run_odometry_arg, tuning_params_arg,
         arduino_bridge, camera_publisher, rplidar,
         OpaqueFunction(function=_tuned_nodes),
         foxglove_bridge,

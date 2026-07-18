@@ -1,5 +1,6 @@
 # 차량/센서 설정 — 새 환경에서는 이 파일(또는 bringup.launch.py 인자)만 바꾸면 된다.
 # 포트가 None이면 자동 감지를 시도한다. 실패 시 arduino_port/lidar_port launch 인자로 지정.
+import os
 
 ARDUINO_PORT = None      # 예: "/dev/ttyACM0"
 ARDUINO_BAUD = 9600
@@ -21,6 +22,11 @@ FRONT_CAMERA_ROTATE = None  # None | "CW" | "CCW" | "180"
 
 LOOP_HZ = 30             # 메인 제어 루프 주기
 POSE_STALE_S = 0.5       # 이 시간 이상 /car/pose 갱신 없으면 pose_conf 강제 0 (odometry_node 중단 감시)
+
+# 디지털 트윈 재현용 주행 로그(drive_logger.py) — mission_node가 매 틱 튜닝
+# 설정값+발행 명령을 타임스탬프와 함께 JSON Lines로 남기는 기본 저장 위치
+# (지도 교수 피드백, 2026-07-18). launch log_dir 인자로 덮어쓸 수 있다.
+DRIVE_LOG_DIR = os.path.expanduser("~/autodrive_skku_logs")
 
 DRIVE_SPEED = 100        # 기본 주행 속도 (-255..255, 실차 검증값)
 SLOW_SPEED = 60          # 주차 등 저속 기동 속도
@@ -99,8 +105,36 @@ ODOMETRY = dict(
     min_pot_span_counts=8,
     vo_min_features=15,
     vo_min_inliers=10,
-    fusion_vo_weight_max=0.8,
     goodfeatures=dict(maxCorners=200, qualityLevel=0.01, minDistance=7, blockSize=7),
     lk_win_size=(21, 21),
     lk_max_level=3,
+    # ---- 칼만필터 융합(fuse(), 2026-07-18 — 상보 필터에서 전환) 파라미터.
+    # kf_p0_*: 초기 분산(=사실상 미신뢰) — 크게 잡아 VO가 한 번도 성공 못 하면
+    # (CAMERA_MOUNT 미측정 등) confidence가 계속 0에 가깝게 유지되게 한다
+    # (기존 "미측정 시 confidence=0" 보장과 동일). kf_q_*: 예측(커맨드-적분)
+    # 노이즈 — 클수록 P가 프레임마다 더 빨리 커져 VO를 더 신뢰. kf_r_*_base/
+    # floor: VO 측정 노이즈 — 인라이어가 많을수록 base에서 floor까지 줄어듦.
+    # kf_conf_*: confidence(0..kf_conf_max) 계산용 — p_ref는 "이 정도 분산이면
+    # 중간 정도 신뢰"의 기준값. 전부 📏 실차 튜닝 대상(기존 fusion_vo_weight_max
+    # 자리를 대신함 — min_pose_conf 게이팅 임계는 그대로 유효).
+    kf_p0_pos=1e6,          # m^2
+    kf_p0_theta=1e6,        # rad^2
+    kf_q_pos=0.01,          # m^2/s 📏
+    kf_q_theta=0.02,        # rad^2/s 📏
+    kf_r_pos_base=0.01,     # m^2 📏
+    kf_r_pos_floor=0.0009,  # m^2 📏
+    kf_r_theta_base=0.02,   # rad^2 📏
+    kf_r_theta_floor=0.0009,  # rad^2 📏
+    kf_conf_p_ref_pos=0.01,    # m^2
+    kf_conf_p_ref_theta=0.01,  # rad^2
+    kf_conf_max=0.8,        # 기존 fusion_vo_weight_max와 동일한 상한/의미
+)
+
+# ---- arduino_node 라이브 조향 POT 스트림 칼만필터 (ADC count 공간,
+# adc_to_deg() 변환 이전에 적용). calibrate_steering()의 _read_pot_median()
+# (중앙값, tools/hw_test.py --pot 수동 스윕 전용)과는 별개 — 이건 매
+# _publish_state 틱(LOOP_HZ)마다 발행되는 라이브 /car/steering_angle 스트림용.
+ARDUINO_STEERING = dict(
+    kf_process_noise=1.0,       # ADC^2/tick — 조향 자체의 실제 변화(정상적 회전) 허용
+    kf_measurement_noise=4.0,   # ADC^2 — 1회 판독의 노이즈 분산 📏
 )

@@ -138,9 +138,11 @@ ros2 run autodrive_skku_ros mission_node
 | `rear_camera:=2` | 후방 카메라 인덱스 (T주차용, `-1`이면 미사용 — C920 2대 이상 감지되면 두 번째를 자동 사용) |
 | `show:=true` | 카메라 창 표시 (`q`로 종료, 디스플레이 있는 환경 한정) |
 | `foxglove_port:=8765` | [Foxglove 모니터링](#7단계-foxglove-모니터링) WebSocket 포트 |
-| `calibrate_steering:=false` | 기본 `true` — 조향 POT 좌/우 풀락 자동 탐색(바퀴가 몇 초간 실제로 움직임, POT 미장착이면 자동 스킵). [조향 POT 자동 캘리브레이션](#조향-pot-자동-캘리브레이션-선택-하드웨어) 참고 |
+| `steering_adc_left:=300 steering_adc_right:=500` | 조향 POT 좌/우 풀락 ADC 고정값 — 기본 `0.0`(미설정)이면 `/car/steering_angle` 미발행. [조향 POT 캘리브레이션](#조향-pot-캘리브레이션-선택-하드웨어) 참고 |
 | `run_odometry:=false` | 기본 `true` — 상대 pose 추정(`/car/pose`) 노드. 실측 파라미터 입력 전에는 confidence=0으로 비활성 동작이라 켜둬도 무해. [오도메트리](#오도메트리-odometry_node) 참고 |
 | `tuning_params:=config/mission_tuning.yaml` | `tools/dump_tuning.py`가 저장한 튜닝 YAML로 기동 — 이전 세션의 `ros2 param set` 튜닝이 재기동 후에도 유지된다. [실차 튜닝](#실차-튜닝-ros2-param) 참고 |
+| `log_drive:=false` | 기본 `true` — 매 제어 틱마다 튜닝값+명령을 타임스탬프와 함께 JSON Lines로 기록(디지털 트윈 재현용). [주행 로그](#주행-로그-디지털-트윈-재현용) 참고 |
+| `log_dir:=/path/to/logs` | 주행 로그 저장 디렉토리. 기본은 `config.DRIVE_LOG_DIR`(`~/autodrive_skku_logs`) |
 
 **종료는 `Ctrl+C` 한 번** — SIGINT/SIGTERM 둘 다 모터에 정지 신호를 보낸 뒤 종료된다(안전 종료 처리됨). 이상하면 [문제 해결](#문제-해결) 표부터 볼 것.
 
@@ -344,20 +346,31 @@ ros2 param set /odometry_node camera_mount.height_m 0.52
 - `V`를 한 번도 받지 못하면 기존 `run_test_fixed.ino`처럼 G/2/S 수동 명령으로 동작 (구버전 호환)
 - **속도 램프(Cubic Polynomial Trajectory)**: `drive(speed)`가 지정한 목표 속도까지 `V` 값을 즉시 점프시키지 않고 `SPEED_RAMP_S`(기본 0.5초, `arduino_node.py`) 동안 3차 다항식으로 부드럽게 도달시킨다(급가속/급정지로 인한 휠슬립·드리프트 완화, 2026-07-17 도입). `stop()`은 이 램프를 타지 않고 즉시 정지 — 안전 우선. 실차 튜닝 시스템(`ros2 param set`)에는 아직 안 물려 있음(코드 상수 수정 후 재빌드 필요) — 다음 단계 후보.
 
-### 조향 POT 자동 캘리브레이션 (선택 하드웨어)
+### 조향 POT 캘리브레이션 (선택 하드웨어)
 
-조향 링키지에 가변저항(POT)을 달고 와이퍼 핀을 아두이노 메가의 **A6**에 연결하면(전용 보드 아니고 이 메가에 직결 — GND/5V도 같이 배선), `arduino_node`가 뜰 때마다 `calibrate_steering:=true`(기본값)로 자동 캘리브레이션을 한다:
+조향 링키지에 가변저항(POT)을 달고 와이퍼 핀을 아두이노 메가의 **A6**에 연결하면(전용 보드 아니고 이 메가에 직결 — GND/5V도 같이 배선), `/car/steering_pot`(raw ADC)이 항상 발행된다. `/car/steering_angle`(±`STEERING_LIMIT_DEG`로 환산한 deg)까지 받으려면 좌/우 풀락 ADC를 launch 인자로 고정 입력해야 한다.
 
-1. `steer_pulse("L")`을 반복하며 POT ADC가 더 이상 안 바뀔 때까지(기계적 풀락) 진행
-2. 반대쪽도 `steer_pulse("R")`로 동일하게 진행
-3. 두 풀락 값의 중간으로 조향을 되돌려 놓음
-4. 이후 `/car/steering_pot`(raw ADC), `/car/steering_angle`(±`STEERING_LIMIT_DEG`로 환산한 deg)를 계속 발행
+📏 지도 교수 피드백(2026-07-18): 예전에는 `arduino_node`가 뜰 때마다 `steer_pulse("L"/"R")`을 반복해 좌/우 풀락을 스스로 찾는 자동 캘리브레이션(`calibrate_steering:=true`)을 돌렸다 — 기동할 때마다 바퀴가 예측 없이 몇 초간 움직이는 게 바람직하지 않다는 지적으로 없앴다. 중앙 정렬은 하드웨어 텐션 스프링이 담당하고, 좌/우 ADC는 아래처럼 **한 번만 수동 측정**해 고정값으로 넘긴다:
 
-POT이 없으면(펄스를 줘도 ADC가 안 바뀌면) 자동으로 조용히 스킵되고 기존 펄스 방식 그대로 동작한다 — 항상 켜둬도 안전하다. 단, **캘리브레이션 중 바퀴가 실제로 좌우로 움직이므로** 바퀴를 띄우거나 장애물 없는 곳에서 기동할 것(정 안 되면 `calibrate_steering:=false`).
+1. `python tools/hw_test.py --pot` 실행 — 바퀴를 띄운 상태에서 좌/우 풀락까지 한 번 스윕하고 `adc_left`/`adc_right`를 출력한다(이 스윕 자체는 기존 `ArduinoNode.calibrate_steering()` 로직 그대로 재사용 — 사람이 명시적으로 호출할 때만 동작)
+2. 출력된 값을 `bringup.launch.py`에 고정 입력: `steering_adc_left:=<값> steering_adc_right:=<값>`
+3. 이후 기동부터는 스윕 없이 그 고정값으로 곧바로 `/car/steering_angle`을 발행한다
 
-📏 2026-07 실측: 지금 장착된 POT은 조향 링키지와 완전한 1:1 커플링이 아니라, 풀락 좌우(±20도, 총 40도) 스윙에도 ADC가 4카운트 정도밖에 안 바뀐다 — `calibrate_steering()`의 `min_span`/`stable_tol`/`recenter_tol` 기본값이 이 좁은 실측 범위 기준으로 맞춰져 있다(`arduino_node.py` 참고). 이 상태에서 `/car/steering_angle`은 사실상 좌/중앙/우 정도만 구분되는 거친 해상도다 — 더 정밀하게 쓰려면 POT-조향 커플링(백래시 등)을 기계적으로 개선해야 한다.
+두 값을 지정하지 않으면(기본 `0.0`, 미설정) `/car/steering_angle`은 발행되지 않고 `/car/steering_pot`(raw ADC)만 나온다 — POT 미장착과 동일하게 취급된다.
 
-실측 중 조향 펄스 직후 ADC가 순간적으로 튀는 현상(스티어링 모터 노이즈로 추정)도 관찰됨 — `calibrate_steering()`은 각 펄스 후 한 번만 읽지 않고 짧게 여러 번 읽어 중앙값을 쓰는 방식(`_read_pot_median`)으로 이런 스파이크를 걸러낸다. 그래도 캘리브레이션이 계속 "미검출"로 스킵되면 소프트웨어 튜닝보다 POT 배선(모터 전원선과 분리, 접지 공유점, 디커플링 커패시터 등) 쪽을 의심할 것.
+📏 2026-07 실측: 지금 장착된 POT은 조향 링키지와 완전한 1:1 커플링이 아니라, 풀락 좌우(±20도, 총 40도) 스윙에도 ADC가 4카운트 정도밖에 안 바뀐다 — 이 상태에서 `/car/steering_angle`은 사실상 좌/중앙/우 정도만 구분되는 거친 해상도다(`odometry_node`의 `min_pot_span_counts` 기준 미달이면 자동으로 펄스 카운트 적분 폴백으로 전환됨). 더 정밀하게 쓰려면 POT-조향 커플링(백래시 등)을 기계적으로 개선해야 한다.
+
+측정 중 조향 펄스 직후 ADC가 순간적으로 튀는 현상(스티어링 모터 노이즈로 추정)도 관찰됨 — `calibrate_steering()`은 각 펄스 후 한 번만 읽지 않고 짧게 여러 번 읽어 중앙값을 쓰는 방식(`_read_pot_median`)으로 이런 스파이크를 걸러낸다. 라이브 스트림(`/car/steering_angle`, 매 `LOOP_HZ` 틱)은 별도로 칼만필터(`config.ARDUINO_STEERING`, `ros2 param set`로 튜닝 가능)를 거쳐 발행된다. 측정이 계속 "미검출"로 스킵되면 소프트웨어 튜닝보다 POT 배선(모터 전원선과 분리, 접지 공유점, 디커플링 커패시터 등) 쪽을 의심할 것.
+
+### 주행 로그 (디지털 트윈 재현용)
+
+📏 지도 교수 피드백(2026-07-18): 주행을 디지털 트윈에서 재현해 볼 수 있도록, `mission_node`가 매 제어 틱(`config.LOOP_HZ`)마다 그 순간의 튜닝 설정값(`ros2 param set`으로 기동 중 바뀐 값 포함, 정적 사본이 아닌 라이브 값)과 실제 발행한 조향/속도/게이트 명령을 타임스탬프와 함께 JSON Lines(`.jsonl`, 한 줄 = 한 틱) 파일로 남긴다.
+
+- 기본 `log_drive:=true`로 항상 켜져 있다 — 끄려면 `log_drive:=false`
+- 기본 저장 위치는 `config.DRIVE_LOG_DIR`(`~/autodrive_skku_logs`), `log_dir:=`로 덮어쓸 수 있다
+- 파일명은 `<미션명>_<기동시각>.jsonl` (예: `road_20260718_153000.jsonl`)
+- 한 줄 스키마: `{"t": <unix time>, "mission": ..., "state": <arduino /car/state>, "tuning": {...flatten된 튜닝 파라미터...}, "commands": {"steer": "F"/"L"/"R", "drive": <speed>, "go": <bool>}}`
+- 구현/셀프테스트: `autodrive_skku_ros/drive_logger.py` (`python3 -m autodrive_skku_ros.drive_logger --selftest`, `tools/run_tests.py --drive-log`)
 
 ---
 
@@ -390,8 +403,7 @@ python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 | 카메라 열기 실패 (`VIDIOC_REQBUFS`, `can't open camera by index` 등) | 다른 프로그램이 점유 중인지 확인, WSL2면 [usbipd attach](#2단계-wsl2에서-실행-usb-연결). 그게 아니면 `front_camera` 기본값(자동 감지)이 다른 웹캠을 잘못 골랐을 수 있음(2026-07-17 실차: 내장/타사 웹캠이 `/dev/video0`을 먼저 차지) — `ls /dev/video*` + `v4l2-ctl --list-devices`로 실제 C920 인덱스 확인 후 `front_camera:=<번호>`로 직접 지정 |
 | 아두이노/라이다 포트 뒤바뀜 | `arduino_port:=`/`lidar_port:=` launch 인자로 직접 지정 |
 | 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `teleop_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `teleop_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |
-| 조향이 계속 한쪽으로 감 | 펄스 방식이라 자동 복원 안 됨 — 반대 방향 펄스로 복귀 필요. POT이 달려 있으면 기동할 때마다 자동으로 중앙 복귀됨 |
-| 기동할 때마다 바퀴가 몇 초간 좌우로 저절로 움직임 | 조향 POT 자동 캘리브레이션(정상 동작) — 원치 않으면 `calibrate_steering:=false` |
+| 조향이 계속 한쪽으로 감 | 펄스 방식이라 자동 복원 안 됨 — 반대 방향 펄스로 복귀 필요. 중앙 정렬은 하드웨어 텐션 스프링이 담당 |
 | `ros2 launch`에서 미션 메뉴가 안 뜸/입력이 안 먹힘 | `mission:=road`처럼 launch 인자로 미리 지정할 것 — 대화형 메뉴는 `ros2 run autodrive_skku_ros mission_node`로 직접 실행할 때만 stdin이 정상 동작한다 |
 | `colcon build`에서 새 실행파일 이름이 안 보임 | [8단계](#8단계-코드-업데이트-반영-2회차-이후) 참고 — 증분 빌드가 entry_points 변경을 못 잡는 흔한 문제 |
 | `colcon build`가 이 프로젝트와 무관한 다른 패키지 때문에 실패/중단됨 | 워크스페이스 `src/`에 다른 패키지가 같이 있으면 그중 하나만 깨져도 기본적으로 전체 빌드가 중단된다 — `colcon build --packages-up-to autodrive_skku_ros`로 이 프로젝트만 빌드 대상으로 좁힐 것(`setup.sh`/`update.sh`는 이미 이렇게 함). `.venv` 등 파이썬 가상환경이 활성화된 상태로 빌드하면 다른 이유로도 실패할 수 있으니 `deactivate` 후 시도할 것 — ROS 2 전환 후에는 `.venv`가 원래 필요 없다(이전 워크플로의 잔재라면 삭제해도 됨) |

@@ -53,6 +53,18 @@ def _run_env():
     return all([m.check_imports(), m.check_cameras(), m.check_serial_ports()])
 
 
+def _run_filters():
+    # 범용 스칼라 칼만필터 유틸(lane_follow/t_parking/odometry_node/arduino_node
+    # 공유)은 filters.py 로컬 셀프테스트로 관리됨 — _run_lidar와 동일 패턴
+    m = _load("autodrive_skku_ros.filters")
+    return m.selftest() == 0
+
+
+def _run_drive_log():
+    m = _load("autodrive_skku_ros.drive_logger")
+    return m.selftest() == 0
+
+
 def _run_lidar():
     # 순수 지오메트리 함수 테스트는 nodes/lidar_node.py 로컬 셀프테스트로 이관됨
     m = _load("autodrive_skku_ros.nodes.lidar_node")
@@ -111,6 +123,8 @@ def _run_debug_viz():
 
 MODULES = {
     "env": ("환경/하드웨어 점검 (패키지·카메라·시리얼)", _run_env),
+    "filters": ("범용 스칼라 칼만필터 유틸 순수 함수", _run_filters),
+    "drive_log": ("주행 설정값+명령 타임스탬프 로그 (디지털 트윈 재현용)", _run_drive_log),
     "lidar": ("라이다 후방 장착 지오메트리 + ROS LaserScan 변환 순수 함수", _run_lidar),
     "odometry": ("오도메트리 VO+커맨드 적분 융합 순수 함수 (IEEE 5520874 기반)", _run_odometry),
     "camera": ("카메라 흰색 형태 구분 (차선/정지선/횡단보도/장애물)", _run_camera),

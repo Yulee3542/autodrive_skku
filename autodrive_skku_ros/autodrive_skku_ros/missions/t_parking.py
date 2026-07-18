@@ -13,6 +13,7 @@ from .base import Mission, traveled_m
 from .lane_follow import LaneCenterTracker, follow_lane_poi
 from .occupancy import OccupancyMap
 from .. import config as _config
+from .. import filters
 from ..nodes.lidar_node import filter_self, rear_min_m
 
 
@@ -26,6 +27,12 @@ T_PARKING = dict(
     slot_max_lateral_m=2.0,  # 슬롯 후보로 인정할 최대 측면 거리
     align_tol_px=25,       # 후방캠 주차선 중점 정렬 허용 오차 (px)
     align_ticks=5,         # 연속 정렬 판정 틱 수
+    # ---- 주차선 중점 오차(reverse_lane_steer) 칼만필터 (2026-07-18,
+    # lane_follow.LaneCenterTracker와 동일 패턴) — 한 프레임 주차선 미검출로
+    # 바로 _last_err_px=None을 만들지 않고 predict-only로 버티게 한다.
+    kf_process_noise=4.0,       # px^2/tick
+    kf_measurement_noise=4.0,   # px^2 📏
+    kf_max_variance_px=100.0,   # 이 이상 불확실해지면 추정 폐기(None 취급) 📏
     turn_in_pulses=4,      # PARK 진입 조향 펄스 수
     turn_in_s=2.0,         # 슬롯 방향 후진 회전 구간
     straighten_s=1.5,      # 반대 조향으로 차체 정렬 구간
@@ -84,7 +91,8 @@ class TParkingMission(Mission):
         self.scans = deque(maxlen=self.p["map_scans"])  # 맵 빌딩용 라이다 스캔 누적
         self.occ = None             # 점유 격자 — 오도메트리 신뢰 가능해지면 생성
         self._slot = None           # (bearing_deg, dist_m) — slot_found가 기록
-        self._last_err_px = None    # reverse_lane_steer가 기록하는 주차선 중점 오차
+        self._last_err_px = None    # reverse_lane_steer가 기록하는 주차선 중점 오차(칼만필터링됨)
+        self._err_kf = filters.ScalarKalmanFilter()
         self._align_count = 0
         self._parked_count = 0
         self._park_phase = None     # PARK 서브 페이즈
@@ -329,11 +337,26 @@ class TParkingMission(Mission):
         조향을 정한다. "후진" 시 차체 뒤가 조향 반대쪽으로 돌아가므로
         전진 기준 방향을 구한 뒤 L↔R을 반전해 반환한다.
 
-        debug: dict를 넘기면 클러스터/중점/오차/판정을 채운다
-        (debug_viz.draw_parking_line 오버레이용). 반환값/판정 로직은 불변.
+        오차(err)는 lane_follow.LaneCenterTracker와 동일한 칼만필터
+        (self._err_kf)로 프레임 간 스무딩한다 — 주차선이 한 프레임 안 보여도
+        (glare/각도 등) 곧바로 _last_err_px=None으로 정렬 카운트를 리셋하지
+        않고 predict-only로 버틴다(2026-07-18). 분산이 kf_max_variance_px를
+        넘어서야(오래 못 봄) 실제로 None 취급한다.
+
+        debug: dict를 넘기면 클러스터/원시오차/필터링오차/판정/분산을 채운다
+        (debug_viz.draw_parking_line 오버레이용). 반환값/판정 로직(첫 프레임의
+        err==raw err 등)은 불변.
         """
         if cv2 is None or rear_frame is None:
             return None
+
+        def _predict_only():
+            self._err_kf.predict(self.p["kf_process_noise"])
+            max_var = self.p["kf_max_variance_px"]
+            variance = self._err_kf.variance()
+            too_uncertain = max_var is not None and variance is not None and variance > max_var
+            self._last_err_px = None if too_uncertain else self._err_kf.value()
+
         try:
             s_max, v_min = _config.white_hsv(self.p)  # 흰색 임계 (config.WHITE_HSV 공유)
             h, w = rear_frame.shape[:2]
@@ -343,9 +366,9 @@ class TParkingMission(Mission):
             col_sum = mask.sum(axis=0).astype(float)
             if debug is not None:
                 debug.update(roi_y0=h // 2, tol=self.p["align_tol_px"],
-                             clusters=[], mid=None, err=None, steer=None)
+                             clusters=[], mid=None, raw_err=None, err=None, steer=None)
             if col_sum.max() <= 0:
-                self._last_err_px = None
+                _predict_only()
                 return None
             cols = np.where(col_sum > 0.25 * col_sum.max())[0]
             # 10px 이상 벌어지면 다른 클러스터(다른 주차선)
@@ -361,10 +384,12 @@ class TParkingMission(Mission):
             if debug is not None:
                 debug["clusters"] = clusters
             if len(clusters) < 2:
-                self._last_err_px = None
+                _predict_only()
                 return None  # 주차선 2줄이 다 보여야 정렬 가능
             mid = (clusters[0] + clusters[-1]) / 2.0
-            err = mid - w / 2.0
+            raw_err = mid - w / 2.0
+            self._err_kf.predict(self.p["kf_process_noise"])
+            err = self._err_kf.update(raw_err, self.p["kf_measurement_noise"])
             self._last_err_px = err
             if abs(err) <= self.p["align_tol_px"]:
                 steer = "F"
@@ -372,7 +397,8 @@ class TParkingMission(Mission):
                 forward = "R" if err > 0 else "L"          # 전진 기준 목표 방향
                 steer = "L" if forward == "R" else "R"      # 후진 조향 반전
             if debug is not None:
-                debug.update(mid=mid, err=err, steer=steer)
+                debug.update(mid=mid, raw_err=raw_err, err=err, steer=steer,
+                             variance=self._err_kf.variance())
             return steer
         except Exception as e:
             print(f"[t_parking] 주차선 인식 실패, 이번 프레임 스킵: {e}")

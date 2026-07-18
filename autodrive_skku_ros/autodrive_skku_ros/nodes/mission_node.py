@@ -23,7 +23,7 @@ try:
 except ImportError:
     cv2 = None
 
-from .. import config, debug_viz, tuning
+from .. import config, debug_viz, drive_logger, tuning
 from ..missions import MISSIONS
 from .arduino_node import STATE_UNKNOWN
 from .lidar_node import laserscan_msg_to_tuples
@@ -115,6 +115,7 @@ class RosCarProxy:
         # 디스커버리가 끝난 뒤 어느 틱에서든 반드시 한 번은 도착하게 만든다.
         self._gate_open = False
         self._last_speed = 0
+        self._last_steer = "F"  # drive_logger가 매 틱 마지막 조향 명령을 남기기 위한 추적
 
     def _on_state(self, msg):
         self._state = None if msg.data == STATE_UNKNOWN else msg.data
@@ -122,6 +123,18 @@ class RosCarProxy:
     @property
     def state(self):
         return self._state
+
+    @property
+    def gate_open(self):
+        return self._gate_open
+
+    @property
+    def last_speed(self):
+        return self._last_speed
+
+    @property
+    def last_steer(self):
+        return self._last_steer
 
     def go(self):
         self._gate_open = True
@@ -143,9 +156,11 @@ class RosCarProxy:
         self._drive_pub.publish(Int16(data=self._last_speed))
 
     def steer(self, direction):
+        self._last_steer = direction
         self._steer_pub.publish(String(data=direction))
 
     def steer_pulse(self, direction):
+        self._last_steer = direction
         self._steer_pulse_pub.publish(String(data=direction))
 
 
@@ -197,12 +212,26 @@ class MissionNode(Node):
         # 라이브 조정할 수 있게 노출한다 (미션 선택과 무관하게 전부 선언 —
         # 안 쓰는 namespace는 그냥 무해하다). on_start() 전에 설치해야
         # tuning_params:= 로 들어온 기동 시점 override가 미션 시작값에 반영된다.
-        tuning.install(self, tuning.tunable_dicts(), tuning.tunable_attrs())
+        self._tuning_bindings = tuning.install(
+            self, tuning.tunable_dicts(), tuning.tunable_attrs())
 
         mission_name = resolve_mission(self)
+        self._mission_name = mission_name
         self.get_logger().info(f"mission={mission_name}")
         self._mission = MISSIONS[mission_name]()
         self._mission.on_start(self._car, config)
+
+        # 디지털 트윈 재현용 주행 로그 (지도 교수 피드백, 2026-07-18) — 매 틱
+        # 튜닝값+명령을 타임스탬프와 함께 JSON Lines로 남긴다. log_dir을 비우면
+        # config.DRIVE_LOG_DIR 사용.
+        self.declare_parameter("log_drive", True)
+        self.declare_parameter("log_dir", "")
+        self._drive_logger = None
+        if self.get_parameter("log_drive").value:
+            log_dir = self.get_parameter("log_dir").value or config.DRIVE_LOG_DIR
+            log_path = drive_logger.make_log_path(log_dir, mission=mission_name)
+            self._drive_logger = drive_logger.DriveLogger(log_path)
+            self.get_logger().info(f"주행 로그: {log_path}")
 
         self.create_timer(1.0 / config.LOOP_HZ, self._tick)
 
@@ -277,6 +306,12 @@ class MissionNode(Node):
         # arduino_node가 별도 프로세스라 on_start()의 단발 go()/drive()가 DDS
         # 디스커버리 완료 전에 나가면 유실될 수 있음(RosCarProxy.republish() 참고).
         self._car.republish()
+        if self._drive_logger is not None:
+            self._drive_logger.log(
+                drive_logger.snapshot_bindings(self._tuning_bindings),
+                {"steer": self._car.last_steer, "drive": self._car.last_speed,
+                 "go": self._car.gate_open},
+                mission=self._mission_name, state=self._car.state)
         if self._show and not show_frames(top, bottom, self._back):
             self._show = False
 
@@ -342,6 +377,8 @@ class MissionNode(Node):
 
     def destroy_node(self):
         self._mission.on_stop(self._car)
+        if self._drive_logger is not None:
+            self._drive_logger.close()
         super().destroy_node()
 
 

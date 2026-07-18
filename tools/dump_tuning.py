@@ -32,6 +32,8 @@ NODE_BINDINGS = {
         tuning.odometry_tunable_dicts()),
     "/lidar_geometry_node": lambda: tuning.flatten_bindings(
         tuning.lidar_tunable_dicts(), tuning.lidar_tunable_attrs()),
+    "/arduino_bridge_node": lambda: tuning.flatten_bindings(
+        tuning.arduino_tunable_dicts()),
 }
 
 NS_LOCATION = {
@@ -45,6 +47,7 @@ NS_LOCATION = {
     "lidar_mount": "config.py LIDAR_MOUNT",
     "camera_mount": "config.py CAMERA_MOUNT",
     "odometry": "config.py ODOMETRY",
+    "steering": "config.py ARDUINO_STEERING",
     "speed": "config.py DRIVE_SPEED/SLOW_SPEED",
     "steer": "config.py STEER_PULSE_GAP_S",
     "traffic": "missions/traffic.py TRAFFIC_PIXEL_RATIO",
