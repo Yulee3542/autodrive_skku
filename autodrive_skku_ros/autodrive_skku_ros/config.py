@@ -28,6 +28,12 @@ POSE_STALE_S = 0.5       # 이 시간 이상 /car/pose 갱신 없으면 pose_con
 # (지도 교수 피드백, 2026-07-18). launch log_dir 인자로 덮어쓸 수 있다.
 DRIVE_LOG_DIR = os.path.expanduser("~/autodrive_skku_logs")
 
+# teleop_node 실행 중 /camera/front, /camera/back을 자동으로 mp4로 저장하는 위치.
+# 실제 수신 프레임 간격과 무관하게 이 FPS로 인코딩한다(대략치 — 정확한 타이밍이
+# 필요하면 나중에 프레임 타임스탬프 기반 가변 FPS로 바꿀 것).
+TELEOP_RECORD_DIR = os.path.expanduser("~/autodrive_skku_logs/teleop_recordings")
+TELEOP_RECORD_FPS = 20.0
+
 DRIVE_SPEED = 100        # 기본 주행 속도 (-255..255, 실차 검증값)
 SLOW_SPEED = 60          # 주차 등 저속 기동 속도
 
