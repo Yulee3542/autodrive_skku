@@ -141,7 +141,7 @@ class RoadMission(Mission):
         # (2) 차선 인식 주행 — POI 사다리꼴 다단 밴드 우측차선 추종 (2026-07-16 적용,
         # 기존 vendor edge_detection은 traffic.py에서 계속 씀)
         self.debug["lane_poi"] = follow_lane_poi(
-            self._lane_tracker, car, sensors.get("bottom"), LANE_POI)
+            self._lane_tracker, car, sensors.get("bottom"), LANE_POI, now=self._now)
 
     def pick_avoid_direction(self, scan):
         """라이다 측면 여유 비교로 회피 방향 결정. 반사 없음(None)=완전히 빈 쪽."""

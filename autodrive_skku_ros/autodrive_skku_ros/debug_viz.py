@@ -35,18 +35,21 @@ def _no_data(frame, label):
 
 
 def draw_lane_poi(frame, details):
-    """follow_lane_poi가 반환한 details를 그린다 — 프로토타입 오버레이 포팅."""
-    if not details:
+    """follow_lane_poi가 반환한 details를 그린다 — BEV(원근변환된) 캔버스 위에
+    그린다(2026-07-23, BEV 도입) — 원본 bottom 프레임이 아니라 details["bev"]가
+    캔버스다(밴드/클러스터/목표점이 전부 BEV 픽셀좌표라 원본 프레임에 그리면
+    좌표가 안 맞음). details가 없을 때만(no-data) 인자로 받은 raw frame을 쓴다."""
+    if not details or "bev" not in details:
         return _no_data(frame, "lane_poi")
-    vis = frame.copy()
+    vis = details["bev"].copy()
     h = details["h"]
+    w = details["w"]
     cx = details["cx"]
     bands = details["bands"]
 
     for i, band in enumerate(bands):
         col = _BAND_COLORS[min(i, len(_BAND_COLORS) - 1)]
-        cv2.rectangle(vis, (band["x_lo"], band["y0"]),
-                      (band["x_hi"] - 1, band["y1"]), (90, 90, 90), 1)
+        cv2.line(vis, (0, band["y0"]), (w, band["y0"]), (90, 90, 90), 1)
         for (_center, _mass, lo, hi) in band["clusters"]:
             cv2.line(vis, (int(lo), band["y0"]), (int(lo), band["y1"]), col, 1)
             cv2.line(vis, (int(hi), band["y0"]), (int(hi), band["y1"]), col, 1)
@@ -54,45 +57,46 @@ def draw_lane_poi(frame, details):
             y_mid = (band["y0"] + band["y1"]) // 2
             cv2.circle(vis, (int(band["target"]), y_mid), 4, _RED, -1)
 
-    # 경로 폴리라인 (가까운 → 먼)
+    # 경로 폴리라인 (가까운 → 먼) + raw_target(얇은 주황 세로선)
     pts = details["path_points"]
     for a, b in zip(pts, pts[1:]):
         cv2.line(vis, (int(a[1]), a[0]), (int(b[1]), b[0]), _CYAN, 2)
-
-    # 사다리꼴 외곽선 (가장 가까운 밴드 하단 ↔ 가장 먼 밴드 상단)
-    if bands:
-        near, far = bands[0], bands[-1]
-        cv2.line(vis, (near["x_lo"], near["y1"]), (far["x_lo"], far["y0"]), _ORANGE, 1)
-        cv2.line(vis, (near["x_hi"], near["y1"]), (far["x_hi"], far["y0"]), _ORANGE, 1)
-
-    # 프레임 중앙선 + deadzone 밴드
-    cv2.line(vis, (int(cx), 0), (int(cx), h), (180, 180, 180), 1)
-    deadzone = details.get("deadzone")
-    if deadzone:
-        roi_y = int(h * details.get("roi_frac", (0.67, 0.98))[0])
-        cv2.line(vis, (int(cx - deadzone), roi_y), (int(cx - deadzone), h), (100, 100, 100), 1)
-        cv2.line(vis, (int(cx + deadzone), roi_y), (int(cx + deadzone), h), (100, 100, 100), 1)
-
-    # raw_target(얇은 주황 세로선) + 칼만필터로 스무딩된 조향 목표(굵은 빨간
-    # 세로선) + 상태 텍스트(오프셋/방향/sigma)
-    roi_top_y = int(h * details.get("roi_frac", (0.67, 0.98))[0])
     raw_target = details.get("raw_target")
     if raw_target is not None:
-        cv2.line(vis, (int(raw_target), roi_top_y), (int(raw_target), h), _ORANGE, 1)
+        cv2.line(vis, (int(raw_target), 0), (int(raw_target), h), _ORANGE, 1)
+
+    # 코리도어 락(직전 프레임 SOLID 경계) — 검색에서 제외된 영역을 어둡게 틴트
+    corridor = details.get("corridor") or {}
+    if corridor.get("left") is not None:
+        lx = int(corridor["left"])
+        vis[:, :max(0, lx)] = (vis[:, :max(0, lx)] * 0.5).astype(vis.dtype)
+        cv2.line(vis, (lx, 0), (lx, h), _ORANGE, 1)
+    if corridor.get("right") is not None:
+        rx = int(corridor["right"])
+        vis[:, min(w, rx):] = (vis[:, min(w, rx):] * 0.5).astype(vis.dtype)
+        cv2.line(vis, (rx, 0), (rx, h), _ORANGE, 1)
+
+    # 프레임 중앙선(차량 중심선)
+    cv2.line(vis, (int(cx), 0), (int(cx), h), (180, 180, 180), 1)
+
+    # Pure-Pursuit lookahead 지점 + 조향각/속도 상태 텍스트
+    lookahead_px = details.get("lookahead_px")
+    if lookahead_px is not None:
+        lx, ly = lookahead_px
+        ccx, ccy = details.get("car_center_px", (cx, h - 1))
+        cv2.circle(vis, (int(lx), int(ly)), 6, _CYAN, 2)
+        cv2.line(vis, (int(ccx), int(ccy)), (int(lx), int(ly)), _CYAN, 1)
 
     smoothed = details.get("smoothed")
+    direction = details.get("direction")
+    variance = details.get("variance")
     if smoothed is not None:
-        cv2.line(vis, (int(smoothed), roi_top_y), (int(smoothed), h), _RED, 3)
-        offset = details.get("offset")
-        direction = details.get("direction")
-        variance = details.get("variance")
-        sigma = f" sigma={variance ** 0.5:.1f}px" if variance is not None else ""
-        text = (f"offset={offset:+.0f}px dir={direction} " if offset is not None
-                else "held ") + f"pts={len(pts)}/{len(bands)}{sigma}"
-        cv2.putText(vis, text, (5, max(roi_top_y - 8, 12)),
+        sigma = f" sigma={variance ** 0.5:.1f}deg" if variance is not None else ""
+        text = f"delta={smoothed:+.1f}deg dir={direction} pts={len(pts)}/{len(bands)}{sigma}"
+        cv2.putText(vis, text, (5, max(h - 8, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, _RED, 1)
     else:
-        cv2.putText(vis, "no path points found", (5, max(roi_top_y - 8, 12)),
+        cv2.putText(vis, "no path points found", (5, max(h - 8, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, _RED, 1)
     return vis
 

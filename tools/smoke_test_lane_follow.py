@@ -25,19 +25,43 @@ except ImportError as e:
     sys.exit(1)
 
 from autodrive_skku_ros.missions.lane_follow import (
-    follow_lane, analyze_lane_poi, LANE_POI, _fit_lane_circle, _circle_x_at_y,
-    _classify_lane_type, _poi_pick_right_lane_center)
+    follow_lane, follow_lane_poi, analyze_lane_poi, LaneCenterTracker, LANE_POI,
+    _fit_lane_circle, _circle_x_at_y, _classify_lane_type, _poi_pick_right_lane_center)
 from autodrive_skku_ros.vendor import Function_Library as fl
 
 
 class FakeCar:
-    """실제 ArduinoNode 대신 steer() 호출만 기록하는 더미."""
+    """실제 ArduinoNode 대신 steer()/steer_pulse()/drive() 호출만 기록하는 더미."""
 
     def __init__(self):
         self.calls = []
+        self.steers = []
+        self.pulses = []
+        self.drives = []
 
     def steer(self, direction):
         self.calls.append(direction)
+        self.steers.append(direction)
+
+    def steer_pulse(self, direction):
+        self.calls.append(direction)
+        self.pulses.append(direction)
+
+    def drive(self, v):
+        self.drives.append(v)
+
+
+class FakeClock:
+    """follow_lane_poi(now=...)에 주입하는 가짜 단조 시계 (missions 테스트와 동일 패턴)."""
+
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, dt):
+        self.t += dt
 
 
 def make_line_frame(width=640, height=240):
@@ -131,13 +155,13 @@ def test_circle_x_at_y():
 
 
 def test_fit_lane_circle():
-    print("== _fit_lane_circle (Circular Hough Transform) ==")
+    print("== _fit_lane_circle (Circular Hough Transform, BEV 좌표계) ==")
     ok = True
     cfg = dict(LANE_POI)
 
     ring = np.zeros((600, 600), dtype=np.uint8)
     cv2.circle(ring, (300, 300), 200, 255, 4)  # hough_min/max_radius_px(150~2000) 범위 안
-    fit = _fit_lane_circle(ring, x_off=0, y_off=0, cfg=cfg)
+    fit = _fit_lane_circle(ring, cfg)
     ok &= check("뚜렷한 원 -> 검출됨", fit is not None)
     if fit is not None:
         cx, cy, r = fit
@@ -145,23 +169,38 @@ def test_fit_lane_circle():
                     abs(cx - 300) < 20 and abs(cy - 300) < 20)
         ok &= check(f"반지름 근사 일치 ({r:.0f})~=200",
                     abs(r - 200) < 20)
-        ok &= check("x_off/y_off 절대좌표 반영",
-                    _fit_lane_circle(ring, x_off=50, y_off=30, cfg=cfg)[0] - cx == 50)
 
     blank_img = np.zeros((400, 400), dtype=np.uint8)
     ok &= check("빈 이미지 -> None(원 없음)",
-                _fit_lane_circle(blank_img, 0, 0, cfg) is None)
+                _fit_lane_circle(blank_img, cfg) is None)
     return ok
+
+
+def _identity_bev_cfg(w, h, **overrides):
+    """BEV 워프를 사실상 무왜곡 항등변환으로 만드는 cfg — src_frac을 프레임
+    전체를 덮는 사각형으로, bev_w/bev_h를 프레임 크기와 동일하게 둔다.
+    (실제 캘리브된 사다리꼴이 아닌) 순수 클러스터링/피킹 로직만 검증하고 싶은
+    테스트에서 픽셀 좌표를 그대로 보존하기 위해 쓴다."""
+    cfg = dict(LANE_POI)
+    cfg.update(roi_frac=(0.0, 1.0), bev_w=w, bev_h=h,
+              src_frac=(0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0),
+              car_center_px=(w / 2.0, h - 1.0))  # 기본값(160,239)은 bev_w=320 가정 —
+                                                  # 이 테스트는 bev_w=w로 맞췄으니 같이 갱신
+    cfg.update(overrides)
+    return cfg
 
 
 def test_analyze_lane_poi_straight_unaffected():
     """핵심 회귀 기준: 직선(원이 아닌) 프레임에서는 Hough 원이 안 잡히거나
     안 맞아 circle=None으로 폴백, raw_target은 기존 밴드 클러스터링 결과
-    그대로(원 검출 도입 전과 동일)여야 한다."""
+    그대로(원 검출 도입 전과 동일)여야 한다. BEV 워프는 항등변환 cfg로 무력화
+    (사다리꼴 캘리브 자체가 아니라 클러스터링/피킹 로직 회귀만 확인하는 테스트)."""
     print("== analyze_lane_poi 직선 2줄 프레임 -> Hough 폴백(회귀 없음) ==")
     ok = True
-    frame = make_two_line_frame()
-    details = analyze_lane_poi(frame)
+    w, h = 640, 240
+    frame = make_two_line_frame(width=w, height=h)
+    cfg = _identity_bev_cfg(w, h)
+    details = analyze_lane_poi(frame, cfg)
     ok &= check("직선 2줄 -> circle=None (원이 아니므로 폴백)",
                 details["circle"] is None)
     expected = 200 + 0.75 * (440 - 200)  # _poi_pick_right_lane_center 보간값
@@ -237,6 +276,136 @@ def test_poi_pick_right_lane_center_classification():
     return ok
 
 
+# ---- Pure-Pursuit 조향 (2026-07-23) ----
+# 부호 규약을 잘못 뒤집으면(구현 중 실제로 한 번 걸렸던 버그) 실차에서 반대
+# 방향으로 조향하는 심각한 회귀라, 여기서 명시적으로 좌/우 각각 고정한다.
+# center_deadzone_deg(3도)를 확실히 넘도록 목표점을 중심에서 크게 치우치게
+# 배치(c1=20,c2=260 -> 목표 200, 중심 320보다 120px 왼쪽 / c1=380,c2=620 ->
+# 목표 560, 중심보다 240px 오른쪽).
+
+def _run_until_pulse(tracker, car, frame, cfg, clock, max_ticks=20):
+    """deadzone/칼만필터 초기 수렴 때문에 첫 틱에 바로 안 나올 수 있어, pulse가
+    나올 때까지(혹은 max_ticks까지) 게이트 간격만큼 시계를 돌리며 반복 호출."""
+    for _ in range(max_ticks):
+        follow_lane_poi(tracker, car, frame, cfg, now=clock)
+        if car.pulses:
+            return
+        clock.advance(0.2)  # STEER_PULSE_GAP_S(0.15s)보다 넉넉히 크게
+
+
+def test_pure_pursuit_direction_sign():
+    print("== follow_lane_poi Pure-Pursuit 조향 부호 (좌/우 고정 회귀가드) ==")
+    ok = True
+    w, h = 640, 240
+    cfg = _identity_bev_cfg(w, h)
+
+    left_frame = make_two_line_frame(width=w, height=h, c1=20, c2=260)   # 목표 200 (중심 320보다 왼쪽)
+    tracker, car, clk = LaneCenterTracker(), FakeCar(), FakeClock()
+    _run_until_pulse(tracker, car, left_frame, cfg, clk)
+    ok &= check("목표가 중심보다 왼쪽 -> steer_pulse('L')",
+                car.pulses and car.pulses[-1] == "L")
+
+    right_frame = make_two_line_frame(width=w, height=h, c1=380, c2=620)  # 목표 560 (중심보다 오른쪽)
+    tracker2, car2, clk2 = LaneCenterTracker(), FakeCar(), FakeClock()
+    _run_until_pulse(tracker2, car2, right_frame, cfg, clk2)
+    ok &= check("목표가 중심보다 오른쪽 -> steer_pulse('R')",
+                car2.pulses and car2.pulses[-1] == "R")
+
+    centered_frame = make_two_line_frame(width=w, height=h, c1=185, c2=425)  # 목표 365, 중심 320+45
+    # 45px는 위 좌/우 케이스(±120/±240px)보다 훨씬 작음 — deadzone_deg 근방 거동 참고용.
+    # (deadzone 자체는 각도 단위라 px 임계로 정확히 대응되진 않지만, 크게 벗어난
+    # 좌/우 케이스와 대비해 "거의 중앙"에서 방향이 급변하지 않는지 확인)
+    tracker3, car3, clk3 = LaneCenterTracker(), FakeCar(), FakeClock()
+    for _ in range(5):
+        follow_lane_poi(tracker3, car3, centered_frame, cfg, now=clk3)
+        clk3.advance(0.2)
+    ok &= check("거의 중앙 목표 -> steer('F') 유지 또는 그쪽 방향으로만 펄스(반대방향 없음)",
+                all(p != "L" for p in car3.pulses) or all(p != "R" for p in car3.pulses))
+    return ok
+
+
+def test_follow_lane_poi_steer_pulse_gating():
+    """예전 car.steer()(dedup)는 방향이 안 바뀌면 이후 프레임에서 재전송을 안 해
+    사실상 한 번만 툭 치고 끝났다 — car.steer_pulse()(강제 재전송)로 바꿔
+    deadzone 밖인 동안 계속 보정해야 한다(단, STEER_PULSE_GAP_S 간격은 지킬 것)."""
+    print("== follow_lane_poi steer_pulse 게이팅 (지속 보정, 예전 dedup 한계 해소) ==")
+    ok = True
+    w, h = 640, 240
+    cfg = _identity_bev_cfg(w, h)
+    frame = make_two_line_frame(width=w, height=h, c1=20, c2=260)  # 목표 200, 계속 'L'이어야 함
+    tracker, car, clk = LaneCenterTracker(), FakeCar(), FakeClock()
+
+    for _ in range(3):  # 칼만필터 수렴 + 첫 펄스까지
+        follow_lane_poi(tracker, car, frame, cfg, now=clk)
+        if car.pulses:
+            break
+        clk.advance(0.2)
+    n_after_warmup = len(car.pulses)
+    ok &= check("워밍업 후 최소 1회 펄스 발행", n_after_warmup >= 1)
+
+    # 게이트 간격(STEER_PULSE_GAP_S) 안에서는 재호출해도 추가 펄스 없어야 함
+    follow_lane_poi(tracker, car, frame, cfg, now=clk)
+    ok &= check("게이트 간격 안 재호출 -> 추가 펄스 없음", len(car.pulses) == n_after_warmup)
+
+    # 간격을 넘겨 여러 틱 더 돌리면 계속 같은 방향으로 펄스가 이어져야 함(지속 보정)
+    for _ in range(5):
+        clk.advance(0.2)
+        follow_lane_poi(tracker, car, frame, cfg, now=clk)
+    ok &= check("간격 지나 계속 호출 -> 펄스가 계속 추가됨(지속 보정, 예전엔 여기서 멈췄음)",
+                len(car.pulses) > n_after_warmup)
+    ok &= check("전부 같은 방향('L')", all(p == "L" for p in car.pulses))
+    return ok
+
+
+def test_follow_lane_poi_speed_modulation():
+    print("== follow_lane_poi 곡률 기반 속도 감속 ==")
+    ok = True
+    w, h = 640, 240
+    from autodrive_skku_ros import config
+    cfg = _identity_bev_cfg(w, h)
+
+    # 목표 = 280+0.75*(333-280) = 319.75 ~= 중심(320) — 자전거모델 공식이
+    # (2*WHEELBASE_M/lookahead_거리) 배율로 픽셀 오프셋을 증폭하므로(실측: 640px
+    # 프레임에서 10px 편차만으로도 delta~13도가 나옴 — px_per_m 캘리브 전이라
+    # 정상), "거의 직진"을 안정적으로 재현하려면 실제로 거의 정확히 중앙이어야 함
+    straight_frame = make_two_line_frame(width=w, height=h, c1=280, c2=333)
+    tracker, car, clk = LaneCenterTracker(), FakeCar(), FakeClock()
+    for _ in range(5):
+        follow_lane_poi(tracker, car, straight_frame, cfg, now=clk)
+        clk.advance(0.2)
+    ok &= check(f"거의 직진 -> 속도 ~= config.DRIVE_SPEED({config.DRIVE_SPEED})",
+                car.drives and abs(car.drives[-1] - config.DRIVE_SPEED) <= 5)
+
+    curve_frame = make_two_line_frame(width=w, height=h, c1=20, c2=260)  # 목표 200, 큰 편차(급커브 상당)
+    tracker2, car2, clk2 = LaneCenterTracker(), FakeCar(), FakeClock()
+    for _ in range(5):
+        follow_lane_poi(tracker2, car2, curve_frame, cfg, now=clk2)
+        clk2.advance(0.2)
+    ok &= check(f"급커브 상당 -> 속도 < config.DRIVE_SPEED (config.SLOW_SPEED={config.SLOW_SPEED} 쪽으로 감속)",
+                car2.drives and car2.drives[-1] < config.DRIVE_SPEED)
+    return ok
+
+
+def test_bev_adaptive_threshold_vs_fixed():
+    """이 트랙에서 실제로 실패가 확인된 시나리오 재현: 차선 V~150, 배경 V~100 —
+    고정 임계 170이면 차선(150<170)도 배경(100<170)도 전부 "흰색 아님"으로 걸러져
+    완전 미검출된다. Otsu 적응 임계는 150/100 사이 어딘가에 임계를 잡아 정상
+    분리해야 한다."""
+    print("== BEV Otsu 적응 임계 vs 예전 고정임계(170) 실패 시나리오 ==")
+    ok = True
+    w, h = 640, 240
+    cfg = _identity_bev_cfg(w, h)
+
+    frame = np.full((h, w, 3), 100, dtype=np.uint8)  # 어두운 노면 배경 (V~100)
+    cv2.line(frame, (200, 0), (200, h - 1), (150, 150, 150), 8)  # 차선 (V~150, 여전히 170 미만)
+    cv2.line(frame, (440, 0), (440, h - 1), (150, 150, 150), 8)
+
+    details = analyze_lane_poi(frame, cfg)
+    ok &= check("어두운 조명(차선 V~150 < 고정임계 170)에서도 raw_target 검출됨"
+                " (Otsu 적응 임계 덕분)", details is not None and details["raw_target"] is not None)
+    return ok
+
+
 def main():
     results = [
         test_follow_lane_no_crash(),
@@ -246,6 +415,10 @@ def main():
         test_analyze_lane_poi_straight_unaffected(),
         test_classify_lane_type(),
         test_poi_pick_right_lane_center_classification(),
+        test_pure_pursuit_direction_sign(),
+        test_follow_lane_poi_steer_pulse_gating(),
+        test_follow_lane_poi_speed_modulation(),
+        test_bev_adaptive_threshold_vs_fixed(),
     ]
     passed = all(results)
     print("\n결과:", "이상 없음" if passed else "위 [X] 항목 확인 필요")

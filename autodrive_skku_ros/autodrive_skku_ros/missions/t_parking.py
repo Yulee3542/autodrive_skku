@@ -140,7 +140,7 @@ class TParkingMission(Mission):
             # 운영자 키 입력이므로 이 상태에 터미널 조건은 없다.
             car.drive(self.config.DRIVE_SPEED)
             self.debug["lane_poi"] = follow_lane_poi(
-                self._lane_tracker, car, sensors.get("bottom"))
+                self._lane_tracker, car, sensors.get("bottom"), now=self._now)
 
         else:  # DONE
             car.stop()

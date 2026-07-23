@@ -65,12 +65,17 @@ def test_lane_poi_analysis():
     d2 = lane_follow.follow_lane_poi(tracker, car, frame)
     ok &= check("follow_lane_poi가 details 반환 (direction 포함)",
                 d2 is not None and d2.get("direction") is not None)
-    # analyze의 offset 부호와 실제 조향이 일치해야 한다 (첫 프레임: smoothed=raw)
-    expected = "R" if d2["offset"] > d2["deadzone"] else \
-               "L" if d2["offset"] < -d2["deadzone"] else "F"
-    ok &= check(f"offset({d2['offset']:+.0f}px) 부호와 조향({car.steers[-1]}) 일치",
-                car.steers[-1] == expected == d2["direction"])
-    ok &= check("우측 치우침 프레임 → 'R' 조향", car.steers[-1] == "R")
+    # analyze의 delta_deg 부호와 실제 조향이 일치해야 한다 (첫 프레임: smoothed=raw).
+    # L/R은 이제 car.steer_pulse()로 나가고 "F"만 car.steer()로 나간다(2026-07-23,
+    # 지속 보정을 위한 변경 — steer()는 dedup이라 방향이 안 바뀌면 재전송을 안 함).
+    actual = car.pulses[-1] if car.pulses else car.steers[-1]
+    # delta_deg 부호 규약: 양수=목표가 차량 좌측 → 좌회전("L"), 음수="R" (lane_follow.py
+    # follow_lane_poi 참고 — 예전 픽셀 오프셋 방식(양수=우측→"R")과 부호가 반대).
+    expected = "L" if d2["smoothed"] > d2["deadzone"] else \
+               "R" if d2["smoothed"] < -d2["deadzone"] else "F"
+    ok &= check(f"조향각({d2['smoothed']:+.1f}deg) 부호와 조향({actual}) 일치",
+                actual == expected == d2["direction"])
+    ok &= check("우측 치우침 프레임 → 'R' 조향", actual == "R")
 
     ok &= check("None 프레임 → None (조향 없음)",
                 lane_follow.analyze_lane_poi(None) is None)
@@ -122,7 +127,9 @@ def test_draw_functions():
 
     tracker, car = lane_follow.LaneCenterTracker(), FakeCar()
     details = lane_follow.follow_lane_poi(tracker, car, frame)
-    ok &= check("draw_lane_poi", _vis_ok(debug_viz.draw_lane_poi(frame, details), frame))
+    # draw_lane_poi는 이제 원본 frame이 아니라 details["bev"](BEV로 워프된 캔버스,
+    # 크기가 다를 수 있음)에 그린다(2026-07-23, BEV 도입) — shape 비교 기준도 그에 맞춘다.
+    ok &= check("draw_lane_poi", _vis_ok(debug_viz.draw_lane_poi(frame, details), details["bev"]))
     ok &= check("draw_lane_poi no-data", _vis_ok(debug_viz.draw_lane_poi(frame, None), frame))
 
     dbg = {}

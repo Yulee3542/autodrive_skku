@@ -36,9 +36,9 @@ def test_flatten_coverage():
     expected = sum(_leaf_count(d) for d in dicts.values()) + len(attrs)
     ok &= check(f"mission 바인딩 수 {len(bindings)} == 리프 키 합 {expected}",
                 len(bindings) == expected)
-    ok &= check("대표 키 존재 (lane_poi.white_thresh / t_parking.side / speed.drive)",
+    ok &= check("대표 키 존재 (lane_poi.n_bands / t_parking.side / speed.drive)",
                 all(k in bindings for k in
-                    ("lane_poi.white_thresh", "t_parking.side", "speed.drive")))
+                    ("lane_poi.n_bands", "t_parking.side", "speed.drive")))
 
     odo = tuning.flatten_bindings(tuning.odometry_tunable_dicts())
     ok &= check("odometry 중첩 dict 평탄화 (odometry.goodfeatures.maxCorners)",
@@ -55,18 +55,18 @@ def test_apply_identity():
     ok = True
     bindings = tuning.flatten_bindings(tuning.tunable_dicts(), tuning.tunable_attrs())
 
-    orig = lane_follow.LANE_POI["white_thresh"]
+    orig = lane_follow.LANE_POI["n_bands"]
     try:
-        tuning.apply_value(bindings["lane_poi.white_thresh"], 155)
+        tuning.apply_value(bindings["lane_poi.n_bands"], 5)
         # road.py가 기본 인자로 잡아둔 객체(follow_lane_poi의 config=LANE_POI)와
         # 동일 객체이므로 그쪽에서도 보여야 한다
-        ok &= check("LANE_POI in-place 반영 (155)",
-                    lane_follow.LANE_POI["white_thresh"] == 155)
-        ok &= check("int 타입 유지", isinstance(lane_follow.LANE_POI["white_thresh"], int))
+        ok &= check("LANE_POI in-place 반영 (5)",
+                    lane_follow.LANE_POI["n_bands"] == 5)
+        ok &= check("int 타입 유지", isinstance(lane_follow.LANE_POI["n_bands"], int))
         ok &= check("binding container가 모듈 dict와 동일 객체",
-                    bindings["lane_poi.white_thresh"].container is lane_follow.LANE_POI)
+                    bindings["lane_poi.n_bands"].container is lane_follow.LANE_POI)
     finally:
-        lane_follow.LANE_POI["white_thresh"] = orig
+        lane_follow.LANE_POI["n_bands"] = orig
 
     # t_parking은 on_start에서 self.p = T_PARKING 참조를 잡는다 — 그 후 set해도 보여야 함
     m = t_parking.TParkingMission()
