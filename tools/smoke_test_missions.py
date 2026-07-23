@@ -545,6 +545,68 @@ def test_t_parking_occupancy():
     return ok
 
 
+# ---- 4d. 라이다 슬롯 서보잉 (후방캠 없을 때의 정렬 — 2026-07-23 이식) ----
+
+def _slot_scan(**kw):
+    """slot_detect의 합성 점군을 우리 스캔 튜플 [(quality, raw_deg, dist_mm)]로 환산.
+    점군은 (x=뒤+, y=좌+)이고 bearing=atan2(y,-x)(전방기준), raw=bearing+180."""
+    import math
+    from autodrive_skku_ros.missions import slot_detect
+    scan = []
+    for x, y in slot_detect._synth(**kw):
+        r = math.hypot(x, y)
+        bearing = math.degrees(math.atan2(y, -x))
+        scan.append((15, (bearing + 180.0) % 360.0, r * 1000.0))
+    return scan
+
+
+def test_t_parking_lidar_slot_servo():
+    """후방캠이 없어도(REAR_CAMERA=None이 현재 실제 상태) 라이다만으로 정렬해
+    REVERSE_ALIGN → PARK로 넘어가는지. 기존 경로는 _last_err_px(후방캠)에만
+    의존해서, 후방캠이 없으면 정렬 신호가 아예 없어 영원히 넘어가지 못했다."""
+    print("== t_parking 라이다 슬롯 서보잉 (후방캠 없이 정렬) ==")
+    ok = True
+    m, car, clk = TParkingMission(), FakeCar(), FakeClock()
+    m.on_start(car, config)
+    m._now = clk
+
+    # 검출기 자체가 이 스캔에서 슬롯을 보는지 먼저 확인
+    centered = _slot_scan()
+    obs = m.slot_observe(centered)
+    ok &= check("합성 스캔에서 슬롯 관측됨", obs is not None)
+    ok &= check("debug['slot']에 e_y/e_theta/d/gap 노출",
+                all(k in m.debug.get("slot", {}) for k in ("e_y", "e_theta", "d", "gap")))
+
+    # 슬롯이 좌측으로 치우쳐 있으면 후진 중이므로 반전된 조향이 나와야 한다
+    off = m.slot_steer(_slot_scan(e_y=0.30))
+    ok &= check(f"횡오차 있으면 조향 발생 ({off})", off in ("L", "R"))
+    centered_steer = m.slot_steer(centered)
+    ok &= check(f"정렬돼 있으면 'F' ({centered_steer})", centered_steer == "F")
+
+    # end-to-end: 후방캠 프레임 없이(rear=None) REVERSE_ALIGN에서 PARK로 전이
+    m2, car2, clk2 = TParkingMission(), FakeCar(), FakeClock()
+    m2.on_start(car2, config)
+    m2._now = clk2
+    m2.state = "REVERSE_ALIGN"
+    for _ in range(T_PARKING["align_ticks"] + 2):
+        clk2.advance(0.1)
+        m2.step(sensors(rear=None, scan=centered), car2)
+    ok &= check("후방캠 없이 라이다만으로 REVERSE_ALIGN → PARK", m2.state == "PARK")
+    ok &= check("후진 구동 유지", any(v < 0 for v in car2.drives))
+
+    # 슬롯이 안 보이면 정렬로 오판하지 않아야 한다 (빈 스캔)
+    m3, car3, clk3 = TParkingMission(), FakeCar(), FakeClock()
+    m3.on_start(car3, config)
+    m3._now = clk3
+    m3.state = "REVERSE_ALIGN"
+    for _ in range(T_PARKING["align_ticks"] + 2):
+        clk3.advance(0.1)
+        m3.step(sensors(rear=None, scan=[(15, 0, 3000)]), car3)
+    ok &= check("슬롯 미검출이면 PARK로 넘어가지 않음(오정렬 방지)",
+                m3.state == "REVERSE_ALIGN")
+    return ok
+
+
 def main():
     results = [
         test_white_discrimination(),
@@ -558,6 +620,7 @@ def main():
         test_t_parking_occupancy(),
         test_t_parking_exit_disabled(),
         test_t_parking_exit_stop_mode(),
+        test_t_parking_lidar_slot_servo(),
     ]
     passed = all(results)
     print("\n결과:", "이상 없음" if passed else "위 [X] 항목 확인 필요")

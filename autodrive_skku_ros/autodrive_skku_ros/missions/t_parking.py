@@ -15,6 +15,7 @@ from .occupancy import OccupancyMap
 from .. import config as _config
 from .. import filters
 from .. import vision as _vision
+from . import slot_detect
 from ..nodes.lidar_node import filter_self, rear_min_m
 
 
@@ -38,6 +39,14 @@ T_PARKING = dict(
     # (2026-07-23). 고정 임계로는 어두운 조명에서 주차선을 놓친다. vision.py 참고.
     v_min_floor=110,            # 📏 Otsu가 너무 낮게 잡는 것만 막는 바닥값
     min_contrast=35,            # 📏 이 미만이면 "주차선 없음"(predict-only로 버팀)
+    # ---- 라이다 슬롯 서보잉 (2026-07-23, 팀 저장소 SlotDetector 이식) ----
+    # 후방캠(REAR_CAMERA)이 없거나 주차선을 못 볼 때의 **대체 정렬 신호**.
+    # missions/slot_detect.py가 매 스캔 양옆 주차차량 대비 상대자세를 직접 재므로
+    # 적분이 없어 드리프트가 없고, 오도메트리(pwm_to_mps 미실측)가 꺼져 있어도
+    # 동작한다 — 지금 이 차량 상태에서 REVERSE_ALIGN이 가질 수 있는 유일한
+    # 정렬 신호이기도 하다(후방캠 미장착이면 카메라 경로가 항상 None).
+    slot_theta_gain=0.5,        # 📏 헤딩오차[rad]를 횡오차[m]로 환산하는 가중치
+    slot_align_tol_m=0.06,      # 📏 이 안이면 정렬됨으로 판정 (카메라 align_tol_px의 m판)
     turn_in_pulses=4,      # PARK 진입 조향 펄스 수
     turn_in_s=2.0,         # 슬롯 방향 후진 회전 구간
     straighten_s=1.5,      # 반대 조향으로 차체 정렬 구간
@@ -97,6 +106,7 @@ class TParkingMission(Mission):
         self.occ = None             # 점유 격자 — 오도메트리 신뢰 가능해지면 생성
         self._slot = None           # (bearing_deg, dist_m) — slot_found가 기록
         self._last_err_px = None    # reverse_lane_steer가 기록하는 주차선 중점 오차(칼만필터링됨)
+        self._last_err_m = None     # slot_steer가 기록하는 라이다 슬롯 오차[m] (후방캠 없을 때)
         self._err_kf = filters.ScalarKalmanFilter()
         self._align_count = 0
         self._parked_count = 0
@@ -129,6 +139,9 @@ class TParkingMission(Mission):
             car.drive(-self.config.SLOW_SPEED)
             steer = self.reverse_lane_steer(sensors.get("rear"),
                                             debug=self.debug.setdefault("parking_line", {}))
+            if steer is None:
+                # 후방캠이 없거나 주차선을 못 봄 → 라이다 슬롯 서보잉으로 대체
+                steer = self.slot_steer(sensors.get("lidar_scan"))
             if steer is not None:
                 car.steer(steer)
             if self.aligned(sensors):
@@ -413,9 +426,49 @@ class TParkingMission(Mission):
             self._last_err_px = None
             return None
 
+    def slot_observe(self, scan):
+        """라이다로 슬롯 상대자세를 직접 측정한다 (적분 없음 → 드리프트 없음).
+        SlotObs | None. 실패해도 예외를 내지 않는다 — 못 본 스캔은 None."""
+        try:
+            pts = slot_detect.scan_to_rear_points(scan, self.config.LIDAR_MOUNT)
+            obs = slot_detect.detect_slot(pts) if pts is not None else None
+        except Exception as e:
+            print(f"[t_parking] 슬롯 검출 실패, 이번 스캔 스킵: {e}")
+            obs = None
+        self.debug["slot"] = ({} if obs is None else
+                              dict(e_y=obs.e_y, e_theta=obs.e_theta,
+                                   d=obs.d, gap=obs.gap))
+        return obs
+
+    def slot_steer(self, scan):
+        """후방캠 주차선이 없을 때의 대체 정렬 조향. 'F'/'L'/'R' 또는 None.
+
+        횡오차(e_y)와 헤딩오차(e_theta)를 하나로 합쳐 판단한다. 후진 중이라
+        차체 뒤가 조향 반대쪽으로 가므로 reverse_lane_steer와 동일하게 L↔R을
+        반전해 반환한다."""
+        obs = self.slot_observe(scan)
+        if obs is None:
+            self._last_err_m = None
+            return None
+        err = obs.e_y + self.p["slot_theta_gain"] * obs.e_theta
+        self._last_err_m = err
+        if abs(err) <= self.p["slot_align_tol_m"]:
+            return "F"
+        forward = "L" if err > 0 else "R"   # 슬롯 중심이 좌측이면 좌로 붙어야 함
+        return "R" if forward == "L" else "L"
+
     def aligned(self, sensors):
-        """슬롯 진입 정렬 판정 — 주차선 중점 오차가 연속 align_ticks 틱 허용치 내."""
-        if self._last_err_px is None or abs(self._last_err_px) > self.p["align_tol_px"]:
+        """슬롯 진입 정렬 판정 — 오차가 연속 align_ticks 틱 허용치 내.
+
+        후방캠 주차선 오차(px)를 우선 쓰고, 그게 없으면(후방캠 미장착 등)
+        라이다 슬롯 오차(m)로 판정한다 — 둘 다 없으면 정렬로 보지 않는다."""
+        if self._last_err_px is not None:
+            within = abs(self._last_err_px) <= self.p["align_tol_px"]
+        elif self._last_err_m is not None:
+            within = abs(self._last_err_m) <= self.p["slot_align_tol_m"]
+        else:
+            within = False
+        if not within:
             self._align_count = 0
             return False
         self._align_count += 1

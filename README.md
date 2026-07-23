@@ -229,7 +229,7 @@ WSL2에서 개발 중이면 Windows 쪽 Foxglove 앱은 WSL 내부 IP(`ip addr s
 |------|-----------|------|
 | `road` 도로 주행 | ① 직진·스티어링 ② 차선 인식 주행(BEV + Pure-Pursuit, 2026-07-23) ③ 차선 변경 ④ 장애물 회피 차선 변경 | ①② 동작 / ③④ 테스트 구현 (실차 튜닝 대상). ③④는 오도메트리 보정 시 거리 기반 종료(`out_m`/`back_m`)도 가능 |
 | `traffic` 신호등 주행 | ① 정지선 인식 ② 신호등 라이트 인식(YOLO 1순위 + HSV 폴백, 연속 프레임 디바운스) | ② 동작 / ① 테스트 구현 (실차 튜닝 대상) |
-| `t_parking` T 주차 | ① 라이다 맵 빌딩(+점유 격자) ② 후방캠 주차선 인식 ③ 후진 차선 주행 ④ T주차 알고리즘 ⑤ 출차 후 OUT 통과 | ①~⑤ 테스트 구현 (실차 튜닝 대상). 상태머신 MAP_BUILD→FIND_SLOT→REVERSE_ALIGN→PARK→EXIT→LANE_FOLLOW\|DONE. 출차는 규정 필수(출차실패 f7 −30, OUT 도착실패 f8 −40) — `exit_mode`('lane'=출차 후 차선유지 주행/'stop'=정지), `exit_enabled=false`면 기존처럼 HOLD 후 정지 |
+| `t_parking` T 주차 | ① 라이다 맵 빌딩(+점유 격자) ② 후방캠 주차선 인식(+라이다 슬롯 서보잉 대체) ③ 후진 차선 주행 ④ T주차 알고리즘 ⑤ 출차 후 OUT 통과 | ①~⑤ 테스트 구현 (실차 튜닝 대상). 상태머신 MAP_BUILD→FIND_SLOT→REVERSE_ALIGN→PARK→EXIT→LANE_FOLLOW\|DONE. 출차는 규정 필수(출차실패 f7 −30, OUT 도착실패 f8 −40) — `exit_mode`('lane'=출차 후 차선유지 주행/'stop'=정지), `exit_enabled=false`면 기존처럼 HOLD 후 정지 |
 | `test` 수동 테스트 | 자동주행 없음 — 미션 자체가 키보드 텔레옵 조종(`ros2 run`으로 직접 실행 필요) | 동작 |
 
 "테스트 구현"은 로직이 완성돼 `tools/run_tests.py`의 스모크 테스트(FakeCar/가짜 시계로 상태머신 end-to-end)를 통과하지만, 실차에서 타이밍·임계값 튜닝은 아직 안 됐다는 뜻이다. 각 미션 파일(`autodrive_skku_ros/autodrive_skku_ros/missions/*.py`) 상단 docstring에 세부 목표·동작 방식이, 파일 상단 상수에 그 미션의 튜닝값이 정리돼 있다. `Mission.step(sensors, car)` 인터페이스가 고정돼 있어 튜닝은 상수 수정(또는 주행 중 `ros2 param set` — [실차 튜닝](#실차-튜닝-ros2-param))만으로 끝난다.
@@ -327,6 +327,19 @@ ros2 param set /odometry_node camera_mount.height_m 0.52
   - **`road` 미션(+t_parking 출차 후)**: BEV(원근변환) + Otsu 적응 임계 + 사다리꼴 다단 밴드 검출 + Pure-Pursuit 조향(`follow_lane_poi`/`LANE_POI`, 2026-07-23 적용, 팀 저장소 HANLAB_auto/yeoeun_traffic 브랜치의 `lane_detector_node.py`/`lane_pure_pursuit_node.py` 이식) — vendor `edge_detection`이 차선 없는 환경(실내 등)에서 주변 구조물 엣지를 오검출하는 문제로 개발한 대안. 클러스터링/실선·점선 분류 로직의 원본은 `prototypes/lane_center_poi_windows_test.py`(Windows 네이티브 캡처로 시각 튜닝, ROS 포팅 완료). 조향은 pixel 오프셋 bang-bang이 아니라 lookahead 지점 기반 자전거모델 조향각(`delta_deg`)을 계산해 `car.steer_pulse()`로 지속 보정하고(예전 `car.steer()`는 방향이 안 바뀌면 재전송을 안 해 사실상 한 번만 툭 치고 끝났음), 곡률에 따라 속도도 감속한다. 자세한 캘리브레이션은 [Pure-Pursuit/BEV 캘리브레이션](#pure-pursuit-bev-캘리브레이션) 참고. 오버레이(`/debug/lane_poi`)는 이제 원본 프레임이 아니라 BEV 캔버스 위에 그린다.
   - **`traffic` 미션**: 팀이 검증한 `vendor/Function_Library.py`의 `edge_detection`(`follow_lane()`/`LANE_EDGE`) 그대로 유지.
 - 여러 미션이 공유하는 감지 상수는 `config.py`에 단일 소스로 있다: `WHITE_HSV`(정지선/주차선/장애물 공통 흰색 임계 — 감지기별 `white_s_max`/`white_v_min` override 가능), `STEER_PULSE_GAP_S`(조향 펄스 반복 주기), `WHEELBASE_M`/`STEERING_LIMIT_DEG`(Pure-Pursuit 자전거모델 계산에 사용).
+
+### T주차 정렬 신호 두 갈래 (후방캠 / 라이다)
+
+`REVERSE_ALIGN`에서 슬롯에 맞춰 후진하려면 "지금 얼마나 어긋났는지" 신호가 필요하다. 두 경로가 있고 **후방캠이 우선, 없으면 라이다**로 자동 폴백한다.
+
+| 경로 | 신호 | 조건 |
+|---|---|---|
+| 후방캠 주차선 | 주차선 2줄 중점의 픽셀 오차(`align_tol_px`) | `config.REAR_CAMERA` 설정 + 주차선이 보일 때 |
+| **라이다 슬롯 서보잉** | 양옆 주차차량 대비 `e_y`(횡)/`e_theta`(헤딩)/`d`(깊이) — `missions/slot_detect.py` | 후방캠이 없거나 주차선을 못 볼 때 |
+
+라이다 경로는 팀 저장소(HANLAB_auto)의 `SlotDetector` 이식으로, **적분을 전혀 하지 않고 매 스캔 상대자세를 직접 재기 때문에 드리프트가 원리적으로 없고 오도메트리가 꺼져 있어도 동작한다**. 지금 이 차량은 `REAR_CAMERA=None`(후방캠 미장착) + `ODOMETRY.pwm_to_mps` 미실측이라, 실질적으로 **라이다 경로가 유일하게 살아있는 정렬 신호**다. 관측값은 `Mission.debug["slot"]`으로 노출된다.
+
+📏 실차 튜닝 대상: `slot_align_tol_m`(정렬 허용 오차), `slot_theta_gain`(헤딩오차 가중치), `slot_detect.SLOT_DETECT`의 `cluster_gap`/`gap_range`(옆차 클러스터링). 슬롯을 못 잡으면 `gap_range`부터 실측 간격에 맞출 것.
 
 ### YOLO 설치 시 저장공간 (⚠️ 팀 실사례)
 

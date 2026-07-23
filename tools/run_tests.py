@@ -92,6 +92,12 @@ def _run_ports():
     return m.selftest() == 0
 
 
+def _run_slot_detect():
+    # 주차 슬롯 상대자세 검출(오도메트리 없이 매 스캔 직접 측정) 순수 기하.
+    m = _load("autodrive_skku_ros.missions.slot_detect")
+    return m._selftest()
+
+
 def _run_odometry():
     # 순수 함수(자전거 모델 적분, POT/펄스 선택, VO, 융합, pose 합성) 테스트는
     # nodes/odometry_node.py 로컬 셀프테스트로 관리됨 (_run_lidar와 동일 패턴)
@@ -156,6 +162,7 @@ MODULES = {
     "traffic": ("traffic 미션 상태머신 (정지선/신호등)", _run_traffic),
     "road": ("road 미션 장애물 회피 차선 변경", _run_road),
     "parking": ("t_parking 미션 상태머신 end-to-end", _run_parking),
+    "slot_detect": ("주차 슬롯 상대자세 검출 (오도메트리 없는 반응형 측정)", _run_slot_detect),
     "occupancy": ("T주차 점유 격자 (odom 정합/스캔 역변환/chord 갭)", _run_occupancy_grid),
     "tuning": ("ROS 파라미터 ↔ 튜닝 dict 바인딩 (flatten/apply, in-place 검증)", _run_tuning),
     "debug_viz": ("디버그 오버레이 드로잉 + 감지기 debug out-dict (headless)", _run_debug_viz),
