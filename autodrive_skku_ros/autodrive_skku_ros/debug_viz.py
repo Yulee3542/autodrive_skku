@@ -92,7 +92,10 @@ def draw_lane_poi(frame, details):
     variance = details.get("variance")
     if smoothed is not None:
         sigma = f" sigma={variance ** 0.5:.1f}deg" if variance is not None else ""
-        text = f"delta={smoothed:+.1f}deg dir={direction} pts={len(pts)}/{len(bands)}{sigma}"
+        # SAT: 조향각이 한계로 클램프된 상태 — 계속 뜨면 사실상 bang-bang이라
+        # ld_min_m/px_per_m 재튜닝 신호 (lane_follow._pure_pursuit_delta_deg 주석 참고)
+        sat = " SAT!" if details.get("saturated") else ""
+        text = f"delta={smoothed:+.1f}deg dir={direction} pts={len(pts)}/{len(bands)}{sigma}{sat}"
         cv2.putText(vis, text, (5, max(h - 8, 12)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, _RED, 1)
     else:

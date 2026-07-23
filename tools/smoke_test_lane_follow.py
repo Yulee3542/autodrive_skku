@@ -406,6 +406,85 @@ def test_bev_adaptive_threshold_vs_fixed():
     return ok
 
 
+def test_analyze_uses_full_height_classification():
+    """회귀가드 (2026-07-23에 실제로 발생했던 버그): analyze_lane_poi가
+    _poi_pick_right_lane_center에 **POI 전체 높이** 마스크를 넘겨야 한다.
+    밴드 슬라이스(60px)를 넘기면 점선 한 마디가 그 밴드를 꽉 채워 solid/unknown으로
+    보여 dashed+solid 쌍 판정이 무너지고, 조용히 위치 휴리스틱으로 폴백한다
+    (실패해도 예외가 안 나고 값만 달라져서 기존 테스트로는 안 잡혔음)."""
+    print("== analyze_lane_poi: 실선/점선 분류가 POI 전체 높이 기준인지 (회귀가드) ==")
+    ok = True
+    H, W = 240, 640          # 실제 bottom 프레임 규격
+    frame = np.zeros((H, W, 3), np.uint8)
+    cv2.rectangle(frame, (100, 0), (118, H), (200, 200, 200), -1)   # 좌 실선
+    cv2.rectangle(frame, (500, 0), (518, H), (200, 200, 200), -1)   # 우 실선
+    for y in range(0, H, 24):                                        # 중앙 점선
+        cv2.rectangle(frame, (300, y), (318, y + 12), (200, 200, 200), -1)
+
+    details = analyze_lane_poi(frame, LANE_POI)
+    # BEV 가로 0.5배(640->320): 좌 실선~54.5, 중앙 점선~154.5, 우 실선~254.5
+    dashed_x, solid_x = 154.5, 254.5
+    expect_pair = dashed_x + 0.75 * (solid_x - dashed_x)   # 분류 기반 = 229.5
+    expect_positional = (solid_x + dashed_x) / 2.0          # 위치 휴리스틱 = 204.5
+    got = details["raw_target"]
+    ok &= check(f"raw_target({got:.1f})이 dashed+solid 쌍 기준값({expect_pair:.1f})과 일치",
+                got is not None and abs(got - expect_pair) < 3)
+    ok &= check(f"위치 휴리스틱 폴백값({expect_positional:.1f})이 아님 (그게 나오면 회귀)",
+                got is not None and abs(got - expect_positional) > 3)
+    # 코리도어 락도 같은 이유로 전체 높이 분류 — 중앙 점선을 solid로 잠그면 안 된다
+    corr = details["corridor"]
+    ok &= check(f"코리도어가 좌우 실선에만 잠김 (left={corr['left']}, right={corr['right']}), "
+                "중앙 점선(≈145~159)을 경계로 삼지 않음",
+                corr["left"] is not None and corr["right"] is not None
+                and corr["left"] < 100 and corr["right"] > 200)
+    return ok
+
+
+def test_pure_pursuit_gain_not_saturating():
+    """회귀가드: lookahead(ld_min_m)가 축거보다 짧으면 delta=atan(2L·sinα/ld)의
+    이득 2L/ld가 1을 크게 넘어 조향각이 즉시 ±STEERING_LIMIT_DEG로 포화된다
+    (2026-07-23 실측: ld=0.35에서 BEV 폭의 6%만 치우쳐도 포화 → 사실상 bang-bang,
+    게다가 속도까지 항상 SLOW_SPEED로 바닥). 정상 범위에서는 포화되면 안 된다."""
+    print("== Pure-Pursuit 이득이 포화되지 않는지 (ld vs 축거 회귀가드) ==")
+    from autodrive_skku_ros import config
+    from autodrive_skku_ros.missions.lane_follow import _pure_pursuit_delta_deg
+    ok = True
+    C = LANE_POI
+    ld = min(C["ld_max_m"], max(C["ld_min_m"], C["ld_gain"] * (config.DRIVE_SPEED / 100.0)))
+    gain = 2.0 * config.WHEELBASE_M / ld
+    ok &= check(f"기본 속도에서 이득 2L/ld = {gain:.2f} 가 2.0 미만 (ld={ld:.2f}m, 축거={config.WHEELBASE_M}m)",
+                gain < 2.0)
+
+    n, bh = C["n_bands"], C["bev_h"] / C["n_bands"]
+
+    def delta_for(offset_px):
+        pts = []
+        for i in range(n):
+            y1 = int(C["bev_h"] - i * bh)
+            y0 = int(C["bev_h"] - (i + 1) * bh)
+            pts.append(((y0 + y1) // 2, C["bev_w"] / 2.0 + offset_px))
+        pts.sort(key=lambda p: -p[0])
+        dbg = {}
+        return _pure_pursuit_delta_deg(pts, C, float(config.DRIVE_SPEED), debug=dbg), dbg
+
+    d_small, dbg_small = delta_for(20)     # BEV 폭의 6%
+    d_mid, dbg_mid = delta_for(80)         # 25%
+    ok &= check(f"20px(6%) 치우침 -> delta {d_small:+.1f}deg, 포화 아님",
+                not dbg_small["saturated"])
+    ok &= check(f"80px(25%) 치우침 -> delta {d_mid:+.1f}deg, 포화 아님",
+                not dbg_mid["saturated"])
+    ok &= check("치우침이 커질수록 조향각도 커짐 (비례 제어가 살아있음)",
+                abs(d_mid) > abs(d_small) + 1.0)
+    # 속도 변조가 한 점에 눌려붙지 않고 실제로 범위를 갖는지
+    def speed_for(d):
+        frac = min(1.0, abs(d) / C["curve_steer_deg_for_min"])
+        return round(config.DRIVE_SPEED * (1 - frac) + config.SLOW_SPEED * frac)
+    ok &= check(f"속도 변조 범위 유지 (20px->{speed_for(d_small)}, 80px->{speed_for(d_mid)}) "
+                "— 항상 SLOW_SPEED로 바닥치지 않음",
+                speed_for(d_small) > config.SLOW_SPEED + 10)
+    return ok
+
+
 def main():
     results = [
         test_follow_lane_no_crash(),
@@ -419,6 +498,8 @@ def main():
         test_follow_lane_poi_steer_pulse_gating(),
         test_follow_lane_poi_speed_modulation(),
         test_bev_adaptive_threshold_vs_fixed(),
+        test_analyze_uses_full_height_classification(),
+        test_pure_pursuit_gain_not_saturating(),
     ]
     passed = all(results)
     print("\n결과:", "이상 없음" if passed else "위 [X] 항목 확인 필요")

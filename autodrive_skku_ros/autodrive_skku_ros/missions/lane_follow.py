@@ -151,16 +151,31 @@ LANE_POI = dict(
     #   alpha = atan2(y_left, x_fwd)  (lookahead 지점 방위각)
     #   delta = atan2(2*WHEELBASE_M*sin(alpha), lookahead_distance)
     # config.WHEELBASE_M/STEERING_LIMIT_DEG(이미 존재하던 실측 차량 제원)를 그대로 쓴다.
-    px_per_m=176.0,               # 📏 미실측 — 팀원 동일 BEV 폭(320) 기준값을 시작값으로
-                                    # 차용. 실측 전에는 조향각 "크기"만 부정확할 수 있음
-                                    # (방향은 항상 맞음 — STEERING_LIMIT_DEG로 clamp됨).
+    # 📏 미실측 — 팀원의 동일 BEV 폭(320) 기준값을 시작값으로 차용. 방향(좌/우)은
+    # px_per_m과 무관하게 항상 맞는다(alpha=atan2는 픽셀 비율만 쓰므로 스케일이
+    # 약분됨) — 이 값은 조향각 "크기"에만 영향을 준다.
+    # ⚠️ 알려진 한계: 기본 src_frac이 무왜곡 사각형이라 지금의 BEV는 진짜
+    # 호모그래피가 아니라 비등방 리사이즈다 — 세로 3.2배 확대(75행→240) vs 가로
+    # 0.5배 축소(640열→320)로 축별 스케일이 6.4배 어긋나 있어(2026-07-23 실측)
+    # 축 하나짜리 px_per_m으로는 원리적으로 둘 다 표현할 수 없다. 실차에서
+    # src_frac을 진짜 사다리꼴로 캘리브하면(README 절차) 이 왜곡이 사라져 단일
+    # px_per_m이 의미를 갖는다. 그 전까지는 전방거리가 실제와 다르다는 점을 감안할 것.
+    px_per_m=176.0,
     # (bev_w/2, bev_h-1) = BEV 하단 중앙(앞범퍼). tuning.py의 None 슬롯(NONE_SENTINEL/
     # float 전용)과 섞이면 안 되므로(model_path와 동일 이유) 실제 좌표값을 기본값으로
     # 둔다 — bev_w/bev_h를 튜닝으로 바꾸면 이 값도 같이 갱신할 것.
     car_center_px=(160.0, 239.0),
-    ld_min_m=0.35,                 # lookahead 거리 하한
-    ld_max_m=1.20,                 # lookahead 거리 상한
-    ld_gain=0.25,                  # ld = clamp(ld_gain * (speed_proxy/100), ld_min, ld_max)
+    # ---- lookahead 거리. ⚠️ 이 값이 축거(WHEELBASE_M=0.545)보다 짧으면
+    # delta=atan(2L·sinα/ld)의 이득 2L/ld가 1을 크게 넘어 조향각이 즉시 포화된다
+    # (2026-07-23 실측: ld=0.35일 때 2L/ld=3.1 → BEV 폭의 6%(20px)만 치우쳐도
+    # ±20도 한계에 붙고, 그 여파로 속도까지 항상 SLOW_SPEED로 바닥을 침).
+    # 그래서 하한을 2·축거(≈1.09m)에 맞춰 이득을 ~1로 둔다 — F1TENTH 계열
+    # 레퍼런스(min_lookahead 1.0m / max 3.0m, 축거 0.3m대 차량)와도 같은 방향.
+    ld_min_m=1.1,                  # ≈2·WHEELBASE_M — 이보다 낮추면 포화/채터 위험
+    ld_max_m=3.0,                  # F1TENTH 레퍼런스 상한과 동일
+    ld_gain=1.1,                   # ld = clamp(ld_gain * (speed_proxy/100), ld_min, ld_max)
+                                    # DRIVE_SPEED(100)에서 정확히 ld_min이 되도록 맞춤 —
+                                    # 더 빠를수록 더 멀리 본다(속도 적응). 📏 실차 튜닝 대상
     # ---- 조향각 → 펄스 이산화. 아두이노가 연속 조향각 명령을 못 받고(120ms 고정
     # 펄스만 가능) 각도 피드백도 아직 신뢰 못 하는 상태(POT 캘리 보류 중)라,
     # steer_est 폐루프 대신 "매 게이트 간격(config.STEER_PULSE_GAP_S)마다 현재
@@ -397,7 +412,12 @@ def analyze_lane_poi(frame, config=LANE_POI, corridor=None):
         clusters = _poi_find_clusters(
             binary, config["cluster_gap_px"], config["min_cluster_mass"],
             config["max_cluster_width_px"], config["min_row_span_frac"])
-        target = _poi_pick_right_lane_center(clusters, binary_full[y0:y1, :], config)
+        # 실선/점선 분류는 반드시 POI **전체 높이**(binary_full) 기준으로 한다 —
+        # 밴드 한 칸(60px)만 보면 점선의 한 마디가 그 밴드를 꽉 채워 solid로 보이거나
+        # (coverage=1.0) 런이 1개뿐이라 unknown이 돼, dashed+solid 쌍 판정이 무너지고
+        # 위치 휴리스틱으로 조용히 폴백한다(2026-07-23 검증: 4밴드 중 2밴드가 unknown).
+        # 클러스터링(위)만 밴드별이고 분류는 전체 높이 — 이게 원래 설계다.
+        target = _poi_pick_right_lane_center(clusters, binary_full, config)
         bands.append(dict(y0=y0, y1=y1, clusters=clusters, target=target))
         if target is not None:
             path_points.append(((y0 + y1) // 2, target))
@@ -433,12 +453,16 @@ def analyze_lane_poi(frame, config=LANE_POI, corridor=None):
         raw_target = weighted / weights_sum
 
     # 다음 프레임 코리도어 락 갱신 — 이번 프레임에서 SOLID로 확정된 클러스터의
-    # 가장 왼쪽/오른쪽 경계를 기록한다(가장 가까운 밴드=0 기준, 노면에 가장
-    # 가까워 신뢰도가 높음). 확정 못하면 해당 방향은 None(제한 없음)으로 유지.
+    # 가장 왼쪽/오른쪽 경계를 기록한다(가장 가까운 밴드=0의 클러스터 위치 기준,
+    # 노면에 가장 가까워 위치 신뢰도가 높음). 확정 못하면 해당 방향은
+    # None(제한 없음)으로 유지 — 잘못 잠그면 진짜 차선을 스스로 가려버리므로
+    # "확실할 때만 잠근다"가 안전한 쪽이다.
+    # 분류는 위 target 계산과 같은 이유로 POI 전체 높이(binary_full) 기준 —
+    # 밴드 슬라이스로 분류하면 점선이 solid로 오분류돼 중앙 점선에 코리도어를
+    # 잠가버릴 수 있다(그러면 진짜 우측 실선이 검색에서 잘려나감).
     new_corridor = {"left": None, "right": None}
     if bands and bands[0]["clusters"]:
-        near_binary = binary_full[bands[0]["y0"]:bands[0]["y1"], :]
-        types = [(c[0], c[2], c[3], _classify_lane_type(near_binary, c[0], config))
+        types = [(c[0], c[2], c[3], _classify_lane_type(binary_full, c[0], config))
                  for c in bands[0]["clusters"]]
         solids = [(lo, hi) for (_c, lo, hi, t) in types if t == "solid"]
         if solids:
@@ -495,14 +519,19 @@ def _pure_pursuit_delta_deg(path_points, config, speed_proxy, debug=None):
         return None
     alpha = math.atan2(gy, gx)
     delta = math.atan2(2.0 * _config.WHEELBASE_M * math.sin(alpha), ld_actual)
-    delta_deg = math.degrees(delta)
+    delta_deg_raw = math.degrees(delta)
     limit = _config.STEERING_LIMIT_DEG
-    delta_deg = max(-limit, min(limit, delta_deg))
+    delta_deg = max(-limit, min(limit, delta_deg_raw))
     if debug is not None:
         # 픽셀좌표로 역변환(_to_vehicle_frame의 역) — 오버레이가 BEV 위에 lookahead
         # 지점을 표시할 수 있게.
         lookahead_px = (car_center_px[0] - gy * px_per_m, car_center_px[1] - gx * px_per_m)
-        debug.update(alpha_deg=math.degrees(alpha), lookahead_px=lookahead_px)
+        # saturated: 클램프가 실제로 걸렸는지 — 계속 True로 보이면 사실상 bang-bang과
+        # 같아지고(비례 제어 이점 소멸) 속도도 항상 바닥이 되므로, 실차 튜닝 때
+        # ld_min_m/px_per_m을 올려야 한다는 신호다. /debug/lane_poi 오버레이에 표시.
+        debug.update(alpha_deg=math.degrees(alpha), lookahead_px=lookahead_px,
+                     delta_deg_raw=delta_deg_raw,
+                     saturated=abs(delta_deg_raw) > limit)
     return delta_deg
 
 

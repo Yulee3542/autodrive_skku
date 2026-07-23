@@ -186,9 +186,11 @@ class TrafficMission(Mission):
             car.drive(0)
             return
 
+        # follow_lane_poi가 곡률에 따라 속도를 다시 내리므로(감속) 여기 drive는
+        # "프레임이 없어 follow_lane_poi가 조기 반환할 때"의 기본값 역할이다.
         car.drive(self.config.DRIVE_SPEED)
         self.debug["lane_poi"] = follow_lane_poi(
-            self._lane_tracker, car, sensors.get("bottom"), LANE_POI)
+            self._lane_tracker, car, sensors.get("bottom"), LANE_POI, now=self._now)
 
     def _resume(self, car, now):
         self.wait = None
