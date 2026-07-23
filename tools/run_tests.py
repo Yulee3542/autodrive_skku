@@ -71,6 +71,27 @@ def _run_lidar():
     return m.selftest() == 0
 
 
+def _run_arduino():
+    # 시리얼 프로토콜/워치독/조향 POT 캘리브레이션 순수 함수 (_run_lidar와 동일 패턴).
+    # 셀프테스트는 오래전부터 있었지만 이 러너에 등록돼 있지 않아 실제로는 한 번도
+    # 돌지 않았다 — 2026-07-23 등록.
+    m = _load("autodrive_skku_ros.nodes.arduino_node")
+    return m.selftest() == 0
+
+
+def _run_camera_node():
+    # 카메라 캡처/상하분할/회전 보정 순수 함수. (위 "camera" 모듈은 미션 쪽
+    # 흰색 형태 구분 테스트라 서로 다른 대상 — 이름만 비슷하니 혼동 주의.)
+    m = _load("autodrive_skku_ros.nodes.camera_node")
+    return m.selftest() == 0
+
+
+def _run_ports():
+    # 시리얼 포트/카메라 자동 감지 + 스테일 ROS 상태 정리 (ROS 비의존).
+    m = _load("autodrive_skku_ros.nodes.ports")
+    return m.selftest() == 0
+
+
 def _run_odometry():
     # 순수 함수(자전거 모델 적분, POT/펄스 선택, VO, 융합, pose 합성) 테스트는
     # nodes/odometry_node.py 로컬 셀프테스트로 관리됨 (_run_lidar와 동일 패턴)
@@ -126,6 +147,9 @@ MODULES = {
     "filters": ("범용 스칼라 칼만필터 유틸 순수 함수", _run_filters),
     "drive_log": ("주행 설정값+명령 타임스탬프 로그 (디지털 트윈 재현용)", _run_drive_log),
     "lidar": ("라이다 후방 장착 지오메트리 + ROS LaserScan 변환 순수 함수", _run_lidar),
+    "arduino": ("아두이노 시리얼 프로토콜/워치독/조향 POT 캘리브레이션 순수 함수", _run_arduino),
+    "camera_node": ("카메라 캡처/상하분할/회전 보정 순수 함수 (미션 'camera'와 다름)", _run_camera_node),
+    "ports": ("시리얼 포트/카메라 자동 감지 + 스테일 ROS 상태 정리", _run_ports),
     "odometry": ("오도메트리 VO+커맨드 적분 융합 순수 함수 (IEEE 5520874 기반)", _run_odometry),
     "camera": ("카메라 흰색 형태 구분 (차선/정지선/횡단보도/장애물)", _run_camera),
     "lane_follow": ("차선 추종 통합 경로 + portrait 회전 보정", _run_lane_follow),

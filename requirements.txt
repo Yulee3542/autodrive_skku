@@ -15,4 +15,16 @@ rplidar-roboticia
 # None을 반환하고 traffic.py가 자동으로 HSV 검출(detect_light_color)만 쓴다
 # (예외 없음). 무거운 의존성(torch)이라 개발/CI 환경에서는 생략해도 무방 —
 # tools/smoke_test_missions.py는 두 경우 모두 통과해야 한다.
+#
+# ⚠️ 저장공간 주의 (2026-07-23, 팀 실사례): 그냥 `pip install ultralytics`를 하면
+# PyPI 기본 torch가 NVIDIA CUDA 휠 묶음(nvidia-cudnn/cublas/cufft/cusparse/nccl…)
+# 까지 끌고 와 4~6GB를 먹는다. 팀원들이 이걸로 디스크가 꽉 찼고, 원인을 ROS2
+# 재설치로 오해해 워크스페이스를 지웠지만 실제 용량은 ~/.local 에 있어서
+# 해결되지 않았다. 이 차량엔 NVIDIA GPU가 없으므로 **CPU 전용 torch를 먼저**
+# 깔면 같은 기능에 ~700MB면 된다:
+#
+#   pip3 install --user torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip3 install --user ultralytics      # torch가 이미 있으니 CUDA판을 안 받음
+#
+# 이미 CUDA판이 깔렸는지 확인: du -sh ~/.local/lib/python3*/site-packages/nvidia
 ultralytics

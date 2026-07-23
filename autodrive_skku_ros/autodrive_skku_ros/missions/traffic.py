@@ -9,6 +9,7 @@ from .base import Mission
 from .lane_follow import LaneCenterTracker, follow_lane_poi, LANE_POI
 from . import traffic_yolo
 from .. import config as _config
+from .. import vision as _vision
 
 # vendor 미설치 개발 환경용 폴백 상수 복사본. vendor 파일은 수정 금지(대회 규정)라
 # 자동 동기화 불가 — tools/smoke_test_missions.py의 test_vendor_fallback_sync가
@@ -40,6 +41,13 @@ STOP_LINE = dict(
     min_rows=6,            # 연속으로 임계를 넘어야 하는 행 수
     wait_max_s=6.0,        # 정지선 대기 중 신호등 미검출 시 재출발까지 시간 (교착 방지)
     cooldown_s=3.0,        # 재출발 후 같은 정지선 재트리거 억제
+    # 흰색 판정은 vision.white_mask(Otsu 적응 임계)를 lane_follow와 공유한다
+    # (2026-07-23). 고정 임계(white_v_min=180)로는 어두운 트랙 조명에서 정지선을
+    # 통째로 놓치는 게 실측 확인됐다. v_min_floor는 white_v_min과 의미가 다르니
+    # 혼동 주의 — vision.py 상단 설명 참고.
+    v_min_floor=110,       # 📏 Otsu가 너무 낮게 잡는 것만 막는 바닥값
+    min_contrast=35,       # 📏 Otsu 두 무리 평균 밝기 차가 이 미만이면 "정지선 없음"
+                            #    (빈 노면을 반 갈라 급정지하는 오검출 방지)
 )
 
 # 신호등 색 판정: YOLO(1순위) + HSV(폴백, detect_light_color) 이중 검출 +
@@ -211,12 +219,14 @@ class TrafficMission(Mission):
             return False
         try:
             sl = STOP_LINE
-            s_max, v_min = _config.white_hsv(sl)
+            s_max, _v_min_fixed = _config.white_hsv(sl)  # 채도만 공유 (밝기는 Otsu 적응)
             h, w = bottom_frame.shape[:2]
             roi_y0 = int(h * sl["roi_top"])
             roi = bottom_frame[roi_y0:, :]
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, (0, 0, v_min), (179, s_max, 255))
+            mask = _vision.white_mask(roi, s_max, sl["v_min_floor"],
+                                      min_contrast=sl["min_contrast"])
+            if mask is None:
+                return False
             row_frac = mask.sum(axis=1) / (255.0 * w)
             found = False
             run = 0

@@ -3,6 +3,7 @@ import time
 
 from .. import filters
 from .. import config as _config
+from .. import vision as _vision
 
 try:
     from ..vendor import Function_Library as fl
@@ -93,6 +94,9 @@ LANE_POI = dict(
     # 참고). 그래서 팀원 lane_detector_node.py의 V_MIN_FLOOR(110, "전부 어두울
     # 때만" 막는 용도)를 그대로 따로 쓴다.
     white_s_max=None,           # None=config.WHITE_HSV 공유 s_max
+    # Otsu 두 무리의 평균 밝기 차가 이보다 작으면 "흰 선 없음"으로 보고 마스크를
+    # 비운다 — 빈 노면을 Otsu가 억지로 반 가르는 오검출 방지(vision.py ⚠️ 참고) 📏
+    min_contrast=35,
     v_min_floor=110,            # 📏 팀원 실측값 차용 — 전부 어두운 프레임에서 Otsu가
                                  # 너무 낮게(노이즈까지 흰색으로) 잡는 것만 방지하는
                                  # 용도라 config.WHITE_HSV(v_min=180, 고정임계용)보다
@@ -346,22 +350,18 @@ def _bev_warp(frame, config):
     return bev, M
 
 
-def _bev_white_mask(bev_bgr, config):
-    """BEV BGR 이미지 → 흰색(차선) 이진 마스크. Otsu 적응 임계(+바닥값)로 V를
-    가르고, 채도(S)가 낮은(=무채색) 픽셀만 인정한다 — 팀원 lane_detector_node.py의
-    '고정임계 실패 → BEV 내 Otsu 적응' 해결책을 그대로 이식."""
-    hsv = cv2.cvtColor(bev_bgr, cv2.COLOR_BGR2HSV)
-    v = hsv[:, :, 2]
-    s = hsv[:, :, 1]
-    # s_max만 공유(white_v_min은 안 건드림 — 고정임계용 값이라 Otsu 바닥값과
-    # 의미가 다름, LANE_POI 상단 주석 참고). v_min_floor는 이 dict 자체의 값을
-    # 그대로 쓴다(공유 아님).
+def _bev_white_mask(bev_bgr, config, debug=None):
+    """BEV BGR 이미지 → 흰색(차선) 이진 마스크.
+
+    실제 로직은 `vision.white_mask()`(Otsu 적응 임계 + 대비/비율 가드) — 정지선/
+    장애물/주차선 검출기와 **같은 구현을 공유**한다. 여기서는 LANE_POI의 override
+    키를 그 함수 인자로 옮겨주기만 한다.
+    s_max만 공유 WHITE_HSV에서 가져오고(white_v_min은 안 건드림 — 고정임계용
+    값이라 Otsu 바닥값과 의미가 다름, LANE_POI 상단 주석 참고), v_min_floor는
+    이 dict 자체의 값을 쓴다."""
     s_max, _shared_v_min_unused = _config.white_hsv(dict(white_s_max=config["white_s_max"]))
-    v_min_floor = config["v_min_floor"]
-    otsu_thr, _ = cv2.threshold(v, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    thr = max(float(otsu_thr), float(v_min_floor))
-    mask = ((v >= thr) & (s <= s_max)).astype(np.uint8) * 255
-    return cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return _vision.white_mask(bev_bgr, s_max, config["v_min_floor"],
+                              min_contrast=config["min_contrast"], debug=debug)
 
 
 def analyze_lane_poi(frame, config=LANE_POI, corridor=None):

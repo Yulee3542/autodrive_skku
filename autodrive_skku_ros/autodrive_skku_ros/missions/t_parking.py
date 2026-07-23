@@ -14,6 +14,7 @@ from .lane_follow import LaneCenterTracker, follow_lane_poi
 from .occupancy import OccupancyMap
 from .. import config as _config
 from .. import filters
+from .. import vision as _vision
 from ..nodes.lidar_node import filter_self, rear_min_m
 
 
@@ -33,6 +34,10 @@ T_PARKING = dict(
     kf_process_noise=4.0,       # px^2/tick
     kf_measurement_noise=4.0,   # px^2 📏
     kf_max_variance_px=100.0,   # 이 이상 불확실해지면 추정 폐기(None 취급) 📏
+    # 흰색 판정은 vision.white_mask(Otsu 적응 임계)를 lane_follow와 공유한다
+    # (2026-07-23). 고정 임계로는 어두운 조명에서 주차선을 놓친다. vision.py 참고.
+    v_min_floor=110,            # 📏 Otsu가 너무 낮게 잡는 것만 막는 바닥값
+    min_contrast=35,            # 📏 이 미만이면 "주차선 없음"(predict-only로 버팀)
     turn_in_pulses=4,      # PARK 진입 조향 펄스 수
     turn_in_s=2.0,         # 슬롯 방향 후진 회전 구간
     straighten_s=1.5,      # 반대 조향으로 차체 정렬 구간
@@ -358,11 +363,14 @@ class TParkingMission(Mission):
             self._last_err_px = None if too_uncertain else self._err_kf.value()
 
         try:
-            s_max, v_min = _config.white_hsv(self.p)  # 흰색 임계 (config.WHITE_HSV 공유)
+            s_max, _v_min_fixed = _config.white_hsv(self.p)  # 채도만 공유 (밝기는 Otsu 적응)
             h, w = rear_frame.shape[:2]
             roi = rear_frame[h // 2:, :]
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            mask = cv2.inRange(hsv, (0, 0, v_min), (179, s_max, 255))
+            mask = _vision.white_mask(roi, s_max, self.p["v_min_floor"],
+                                      min_contrast=self.p["min_contrast"])
+            if mask is None:
+                _predict_only()
+                return None
             col_sum = mask.sum(axis=0).astype(float)
             if debug is not None:
                 debug.update(roi_y0=h // 2, tol=self.p["align_tol_px"],

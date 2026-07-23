@@ -325,6 +325,22 @@ ros2 param set /odometry_node camera_mount.height_m 0.52
   - **`traffic` 미션**: 팀이 검증한 `vendor/Function_Library.py`의 `edge_detection`(`follow_lane()`/`LANE_EDGE`) 그대로 유지.
 - 여러 미션이 공유하는 감지 상수는 `config.py`에 단일 소스로 있다: `WHITE_HSV`(정지선/주차선/장애물 공통 흰색 임계 — 감지기별 `white_s_max`/`white_v_min` override 가능), `STEER_PULSE_GAP_S`(조향 펄스 반복 주기), `WHEELBASE_M`/`STEERING_LIMIT_DEG`(Pure-Pursuit 자전거모델 계산에 사용).
 
+### YOLO 설치 시 저장공간 (⚠️ 팀 실사례)
+
+신호등 YOLO는 **선택 사항**이다 — 안 깔면 `traffic` 미션이 예외 없이 HSV 검출로만 동작한다. 깔 거라면 순서가 중요하다.
+
+`pip install ultralytics`를 그냥 하면 PyPI 기본 `torch`가 NVIDIA CUDA 휠 묶음(cudnn/cublas/cufft/cusparse/nccl…)까지 끌고 와 **4~6GB**를 먹는다. 이 차량엔 NVIDIA GPU가 없어서 전부 낭비다. 2026-07-23에 팀원들이 이걸로 디스크가 꽉 찼고, 원인을 `setup_ubuntu.sh`의 ROS2 재설치로 오해해 워크스페이스를 지웠지만 — 실제 용량은 `~/.local`에 있어서 해결되지 않았다(그 스크립트는 ROS2를 설치하지 않는다, 있는지 확인만 한다).
+
+```bash
+# CPU 전용 torch를 먼저 → 같은 기능에 ~700MB
+pip3 install --user torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pip3 install --user ultralytics        # torch가 이미 있으니 CUDA판을 안 받음
+
+# 이미 CUDA판이 깔렸는지 확인 / 정리
+du -sh ~/.local/lib/python3*/site-packages/nvidia
+pip3 uninstall -y torch torchvision && (위 CPU 설치 재실행)
+```
+
 ### Pure-Pursuit/BEV 캘리브레이션
 
 `lane_follow.LANE_POI`의 다음 값들은 **실제 카메라 마운트/트랙에서 재측정해야 신뢰할 수 있는 📏 항목**이다 (기본값은 안전하게 시작하기 위한 무왜곡/보수적 placeholder — 캘리브 전에도 회귀 없이 동작은 하지만 조향 "크기"가 부정확할 수 있음):
@@ -434,5 +450,6 @@ python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 | `.sh` 스크립트 실행 시 `Permission denied` | `setup.sh`/`update.sh`가 매번 실행권한을 자동으로 복구하지만, 그 스크립트 자체를 직접 처음 실행할 땐 아직 안 걸려 있을 수 있음 — `chmod +x setup.sh` 등으로 한 번만 직접 부여 |
 | `/scan`의 좌우/전후가 기대와 다름 | `rplidar_ros`의 각도 규약이 기존 파이썬 `rplidar` 라이브러리와 다를 수 있음 — `config.LIDAR_MOUNT`(`yaw_offset_deg`/`invert`)를 실차에서 재보정 |
 | 차선을 잘 못 잡거나(`/debug/lane_poi`에 클러스터 안 잡힘) 조향이 과도/미미함 | [Pure-Pursuit/BEV 캘리브레이션](#pure-pursuit-bev-캘리브레이션) 표 순서대로: 먼저 `v_min_floor`(Otsu 바닥값), 그다음 `src_frac`(BEV 사다리꼴), 마지막 `px_per_m`/`deg_per_pulse`(조향 크기). 방향(좌/우) 자체가 반대면 캘리브 문제가 아니라 회귀 버그이니 `lane_follow.py`의 `_to_vehicle_frame`/부호 규약 주석부터 확인 |
-| 신호등 인식이 HSV만 쓰는 것 같음(`/debug/traffic_light`에 `(hsv)`만 보임) | `ultralytics` 미설치 또는 `models/traffic_light.pt` 없음 — 정상적인 자동 폴백이다(예외 없이 HSV만 사용). YOLO를 쓰려면 `pip3 install --user ultralytics`(무거운 `torch` 포함) 후 재실행. 완전히 끄려면 `ros2 param set /mission_node traffic_light.use_yolo false` |
+| 신호등 인식이 HSV만 쓰는 것 같음(`/debug/traffic_light`에 `(hsv)`만 보임) | `ultralytics` 미설치 또는 `models/traffic_light.pt` 없음 — 정상적인 자동 폴백이다(예외 없이 HSV만 사용). YOLO를 쓰려면 아래 "YOLO 설치 시 저장공간" 순서대로 설치 후 재실행. 완전히 끄려면 `ros2 param set /mission_node traffic_light.use_yolo false` |
+| **디스크가 꽉 참 / `No space left on device`** | 십중팔구 `pip install ultralytics`가 끌고 온 **NVIDIA CUDA 휠(4~6GB)**이다. 확인: `du -sh ~/.local/lib/python3*/site-packages/nvidia`. ROS2 재설치나 워크스페이스 때문이 아니다 — 용량은 `~/.local`에 있으므로 워크스페이스를 지워도 해결되지 않는다. 아래 "YOLO 설치 시 저장공간" 참고 |
 | `[RTPS_TRANSPORT_SHM Error] Failed init_port fastrtps_port...`, `ros2 node list`에 일부 노드만 뜸 | 이전 실행이 크래시(비정상 종료)해서 FastDDS 공유메모리 락 파일이 안 지워진 상태 — `bringup.launch.py`가 매 실행 시작 시 자동으로 정리한다(`ports.cleanup_stale_ros_state()`, 2026-07-17 도입). 그래도 남으면 수동으로 `pkill -9 -f <노드 실행파일명>` + `rm -f /dev/shm/*fastrtps*` 후 재실행, 그래도 안 되면 재부팅(`/dev/shm`은 tmpfs라 완전히 비워짐) |

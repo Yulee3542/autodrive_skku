@@ -8,6 +8,7 @@ except ImportError:
 from .base import Mission, traveled_m
 from .lane_follow import LaneCenterTracker, follow_lane_poi, LANE_POI
 from .. import config as _config
+from .. import vision as _vision
 from ..nodes.lidar_node import side_clearance_m
 
 
@@ -25,6 +26,12 @@ OBSTACLE_CAM = dict(
     min_w_ratio=0.15,           # ROI 폭 대비 블롭 폭 (차선은 이보다 가늚)
     min_h_ratio=0.25,           # ROI 높이 대비 블롭 높이 (정지선은 이보다 낮음)
     min_fill=0.45,              # bbox 채움비 — 대각선 차선은 희박해서 탈락
+    # 흰색 판정은 vision.white_mask(Otsu 적응 임계)를 lane_follow와 공유한다
+    # (2026-07-23). 고정 임계(white_v_min=180)로는 어두운 트랙 조명에서 흰색
+    # 장애물 차량을 통째로 놓치는 게 실측 확인됐다. vision.py 상단 설명 참고.
+    v_min_floor=110,            # 📏 Otsu가 너무 낮게 잡는 것만 막는 바닥값
+    min_contrast=35,            # 📏 이 미만이면 "장애물 없음" (빈 노면을 반 갈라
+                                 #    헛 차선변경하는 오검출 방지)
 )
 
 # 차선 변경 기동 (road 미션 ③④) — 펄스(120ms)↔조향각 매핑 미측정, 전부 실차 튜닝 대상.
@@ -61,13 +68,15 @@ def detect_obstacle_ahead(frame, cam_cfg, debug=None):
     if cv2 is None or frame is None:
         return False
     try:
-        s_max, v_min = _config.white_hsv(cam_cfg)
+        s_max, _v_min_fixed = _config.white_hsv(cam_cfg)  # 채도만 공유 (밝기는 Otsu 적응)
         h, w = frame.shape[:2]
         y0, y1 = int(h * cam_cfg["roi_top"]), int(h * cam_cfg["roi_bottom"])
         x0, x1 = int(w * cam_cfg["col_lo"]), int(w * cam_cfg["col_hi"])
         roi = frame[y0:y1, x0:x1]
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, (0, 0, v_min), (179, s_max, 255))
+        mask = _vision.white_mask(roi, s_max, cam_cfg["v_min_floor"],
+                                  min_contrast=cam_cfg["min_contrast"])
+        if mask is None:
+            return False
         rh, rw = mask.shape[:2]
         num, _labels, stats, _cents = cv2.connectedComponentsWithStats(mask, connectivity=8)
         found = False

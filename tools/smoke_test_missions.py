@@ -162,6 +162,69 @@ def test_white_discrimination():
     return ok
 
 
+# ---- 1a2. 어두운 조명에서의 흰색 검출 (2026-07-23 적응 임계 이식 회귀가드) ----
+
+def _dim_frame(marking_v, bg_v, kind):
+    """어두운 트랙 조명 합성 프레임. kind: 'stop'/'obstacle'/'rear'."""
+    f = np.full((H, W, 3), bg_v, np.uint8)
+    if kind == "stop":
+        cv2.rectangle(f, (0, 260), (W - 1, 280), (marking_v,) * 3, -1)
+    elif kind == "obstacle":
+        cv2.rectangle(f, (180, 150), (300, 250), (marking_v,) * 3, -1)
+    else:  # rear: 세로 주차선 2줄
+        for c in (100, 300):
+            cv2.line(f, (c, 0), (c, H - 1), (marking_v,) * 3, 6)
+    return f
+
+
+def test_dim_lighting_detectors():
+    """정지선/장애물/주차선이 어두운 조명에서도 검출되는지.
+
+    2026-07-23 이전에는 세 검출기 모두 config.WHITE_HSV의 **고정** 임계
+    (v_min=180)를 써서, 흰 마킹의 V가 150쯤으로 내려가는 실내 트랙 조명에서
+    전부 미검출이었다(실측). lane_follow가 먼저 Otsu 적응 임계로 해결했고
+    이제 vision.white_mask로 공유한다. 이 테스트는 (a) 적응 임계로는 잡히고
+    (b) 옛 고정 임계로는 못 잡았음을 같은 프레임에서 함께 보여 회귀를 막는다."""
+    print("== 어두운 조명 흰색 검출 (고정임계 → Otsu 적응 이식 회귀가드) ==")
+    ok = True
+    m = TrafficMission()
+    tp = TParkingMission()
+
+    class _Car:
+        def go(self):
+            pass
+    tp.on_start(_Car(), config)
+
+    marking_v, bg_v = 150, 90   # 마킹이 옛 고정임계(180)보다 어두움
+
+    # (a) 옛 고정 임계였다면 아무것도 안 잡혔다는 증거 — 같은 프레임, 같은 수식
+    fixed_v_min = config.WHITE_HSV["v_min"]
+    roi = _dim_frame(marking_v, bg_v, "stop")[int(H * 0.55):, :]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    legacy = cv2.inRange(hsv, (0, 0, fixed_v_min), (179, config.WHITE_HSV["s_max"], 255))
+    ok &= check(f"옛 고정임계(v_min={fixed_v_min})로는 흰 픽셀 0개 — 회귀 시 이 테스트가 잡아냄",
+                int((legacy > 0).sum()) == 0)
+
+    # (b) 적응 임계로는 세 검출기 모두 정상 동작
+    ok &= check("어두운 조명 정지선 검출", m.stop_line_detected(_dim_frame(marking_v, bg_v, "stop")))
+    ok &= check("어두운 조명 장애물 검출",
+                detect_obstacle_ahead(_dim_frame(marking_v, bg_v, "obstacle"), OBSTACLE_CAM))
+    ok &= check("어두운 조명 주차선 검출",
+                tp.reverse_lane_steer(_dim_frame(marking_v, bg_v, "rear")) in ("F", "L", "R"))
+
+    # (c) 대비 가드: 마킹이 아예 없는 균일 노면을 Otsu가 반 갈라 오검출하면 안 됨
+    # (트랙 한복판 급정지 / 헛 차선변경 방지 — vision.py ⚠️ 참고)
+    flat = np.full((H, W, 3), 130, np.uint8)
+    flat = cv2.add(flat, np.random.RandomState(0).randint(0, 12, flat.shape).astype(np.uint8))
+    ok &= check("마킹 없는 균일 노면 → 정지선 오검출 없음", not m.stop_line_detected(flat))
+    ok &= check("마킹 없는 균일 노면 → 장애물 오검출 없음",
+                not detect_obstacle_ahead(flat, OBSTACLE_CAM))
+
+    # (d) 밝은 조명 회귀 없음
+    ok &= check("밝은 조명은 기존대로 검출", m.stop_line_detected(_dim_frame(255, 0, "stop")))
+    return ok
+
+
 # ---- 1b. vendor 폴백 상수 동기화 가드 ----
 
 def test_vendor_fallback_sync():
@@ -485,6 +548,7 @@ def test_t_parking_occupancy():
 def main():
     results = [
         test_white_discrimination(),
+        test_dim_lighting_detectors(),
         test_vendor_fallback_sync(),
         test_traffic_fsm(),
         test_traffic_yolo_priority_and_fallback(),
