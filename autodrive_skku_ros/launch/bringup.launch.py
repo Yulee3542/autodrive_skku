@@ -60,8 +60,9 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+from autodrive_skku_ros import config
 from autodrive_skku_ros.nodes.ports import (
-    autodetect_cameras, autodetect_ports, cleanup_stale_ros_state)
+    autodetect_cameras, autodetect_ports, cleanup_stale_ros_state, resolve_cameras)
 
 
 def generate_launch_description():
@@ -82,9 +83,16 @@ def generate_launch_description():
     # 어느 인덱스가 전방/후방인지는 물리 마운트 방향 문제라 자동으로 알 수
     # 없음 — 찾은 순서대로 앞부터 배정하고, 틀리면 front_camera:=/rear_camera:=
     # 로 바꿀 것(Foxglove로 실제 화면 보고 확인).
+    # tools/pick_camera.py로 사람이 한 번 확인해 저장해 둔 매핑이 있으면 그걸
+    # 최우선으로 쓴다 — /dev/videoN 번호가 아니라 안정 식별자(by-id)로 저장돼
+    # 있어 재부팅/재연결에도 유지된다. 파일이 없으면 아래 기존 autodetect 그대로
+    # 동작하므로 회귀가 없다.
+    _mapped_front, _mapped_rear = resolve_cameras(config.CAMERA_MAP_PATH)
     _auto_cams = autodetect_cameras()
-    auto_front_camera = _auto_cams[0] if len(_auto_cams) >= 1 else 0
-    auto_rear_camera = _auto_cams[1] if len(_auto_cams) >= 2 else -1
+    auto_front_camera = (_mapped_front if _mapped_front is not None
+                         else (_auto_cams[0] if len(_auto_cams) >= 1 else 0))
+    auto_rear_camera = (_mapped_rear if _mapped_rear is not None
+                        else (_auto_cams[1] if len(_auto_cams) >= 2 else -1))
 
     run_mission_arg = DeclareLaunchArgument(
         "run_mission", default_value="true",

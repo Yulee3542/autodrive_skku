@@ -8,6 +8,7 @@ launch-description 생성 시점에 직접 import해서 쓰고, arduino_node.py/
 오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.ports --selftest
 """
 import glob
+import json
 import os
 import subprocess
 
@@ -104,6 +105,87 @@ def autodetect_cameras(name_filter="c920", video_glob="/dev/video*",
             continue
         matches.append(n)
     return matches
+
+
+# ---------------- 카메라 안정 식별자 / 저장된 매핑 (2026-07-23) ----------------
+# autodetect_cameras()는 "우리 모델(C920)인 장치"까지는 골라내지만, 같은 모델이
+# 두 대(전방/후방)면 어느 쪽이 전방인지 알 수 없어 찾은 순서대로 배정한다.
+# /dev/videoN 번호는 부팅/재연결마다 바뀌므로(노트북 내장캠이 video0을 먼저
+# 가져가는 사례가 실차에서 반복 확인됨) 사람이 한 번 확인한 결과를 번호가 아니라
+# **안정 식별자**로 저장해 둔다. 식별자는 /dev/v4l/by-id/ 심볼릭 링크 이름 —
+# 커널이 USB 벤더/모델/시리얼로 만들어주므로 재연결해도 그대로다.
+CAMERA_BY_ID_DIR = "/dev/v4l/by-id"
+
+
+def camera_stable_id(index, by_id_dir=CAMERA_BY_ID_DIR,
+                     listdir=os.listdir, realpath=os.path.realpath):
+    """/dev/videoN의 N → 안정 식별자(by-id 이름). 못 찾으면 None.
+
+    실패해도 예외를 던지지 않는다(권한 없음/by-id 미지원 플랫폼 등) — 호출부는
+    기존 인덱스 방식으로 폴백하면 된다."""
+    target = f"/dev/video{index}"
+    try:
+        names = listdir(by_id_dir)
+    except Exception:
+        return None
+    for name in sorted(names):
+        try:
+            if realpath(os.path.join(by_id_dir, name)) == target:
+                return name
+        except Exception:
+            continue
+    return None
+
+
+def resolve_camera_index(stable_id, by_id_dir=CAMERA_BY_ID_DIR,
+                         realpath=os.path.realpath, exists=os.path.exists):
+    """저장된 안정 식별자 → 지금의 /dev/videoN 인덱스. 없으면 None
+    (장치가 안 꽂혔거나 이름이 바뀐 경우 — 호출부가 autodetect로 폴백)."""
+    if not stable_id:
+        return None
+    path = os.path.join(by_id_dir, stable_id)
+    try:
+        if not exists(path):
+            return None
+        real = realpath(path)
+    except Exception:
+        return None
+    if "video" not in real:
+        return None
+    try:
+        return int(real.rsplit("video", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def load_camera_map(path, read_text=None):
+    """저장된 {"front": <stable_id>, "rear": <stable_id>} 매핑. 없으면 {}."""
+    try:
+        if read_text is not None:
+            raw = read_text(path)
+        else:
+            with open(path, encoding="utf-8") as f:
+                raw = f.read()
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def resolve_cameras(map_path, name_filter="c920", **kw):
+    """(front_index, rear_index) — 저장된 매핑 우선, 없거나 못 찾으면 기존
+    autodetect 순서로 폴백. 어느 쪽도 없으면 (None, None).
+
+    반환 인덱스가 None이면 호출부가 기존 기본값(front 0 / rear 없음)을 쓴다.
+    """
+    mapping = load_camera_map(map_path)
+    front = resolve_camera_index(mapping.get("front"), **kw)
+    rear = resolve_camera_index(mapping.get("rear"), **kw)
+    if front is not None:
+        return front, rear
+    auto = autodetect_cameras(name_filter=name_filter)
+    return (auto[0] if auto else None,
+            rear if rear is not None else (auto[1] if len(auto) > 1 else None))
 
 
 # 우리 launch가 띄우는 노드 실행파일 이름 — 비정상 종료(Qt abort, rplidar
@@ -278,6 +360,49 @@ def selftest():
         remove=fake_remove)
     check("run()/glob_fn()이 예외를 던져도 크래시 없이 빈 결과로 계속 진행",
           killed2 == [] and removed2 == [])
+
+    # ---- 카메라 안정 식별자 / 저장된 매핑 (2026-07-23) ----
+    # 실제 /dev/v4l/by-id 없이도 검증되도록 listdir/realpath/exists를 주입한다.
+    by_id = {"usb-046d_C920_AAA-video-index0": "/dev/video2",
+             "usb-046d_C920_BBB-video-index0": "/dev/video4"}
+    fake_listdir = lambda _d: list(by_id)
+    fake_realpath = lambda p: by_id.get(os.path.basename(p), p)
+    fake_exists = lambda p: os.path.basename(p) in by_id
+
+    check("videoN → 안정 식별자 역매핑",
+          camera_stable_id(4, listdir=fake_listdir, realpath=fake_realpath)
+          == "usb-046d_C920_BBB-video-index0")
+    check("by-id에 없는 인덱스 → None(폴백 신호)",
+          camera_stable_id(9, listdir=fake_listdir, realpath=fake_realpath) is None)
+    check("by-id 디렉터리 자체가 없어도 예외 없이 None",
+          camera_stable_id(0, listdir=lambda _d: (_ for _ in ()).throw(OSError())) is None)
+
+    check("안정 식별자 → 현재 videoN 인덱스",
+          resolve_camera_index("usb-046d_C920_AAA-video-index0",
+                               realpath=fake_realpath, exists=fake_exists) == 2)
+    check("장치가 빠져 식별자가 없으면 None (재연결 대기)",
+          resolve_camera_index("usb-046d_C920_GONE-video-index0",
+                               realpath=fake_realpath, exists=fake_exists) is None)
+    check("빈/None 식별자 → None", resolve_camera_index(None) is None)
+
+    # 매핑 파일 우선순위: 저장된 값이 있으면 autodetect 순서를 이긴다
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        mp = os.path.join(td, "cameras.json")
+        with open(mp, "w", encoding="utf-8") as f:
+            json.dump({"front": "usb-046d_C920_BBB-video-index0",
+                       "rear": "usb-046d_C920_AAA-video-index0"}, f)
+        front, rear = resolve_cameras(mp, realpath=fake_realpath, exists=fake_exists)
+        check("저장된 매핑이 autodetect 순서를 이김 (front=4, rear=2)",
+              (front, rear) == (4, 2))
+        check("매핑 파일 없음 → autodetect 폴백(예외 없음)",
+              resolve_cameras(os.path.join(td, "nope.json"),
+                              realpath=fake_realpath, exists=fake_exists)
+              == (None, None))
+        with open(mp, "w", encoding="utf-8") as f:
+            f.write("{ this is not json")
+        check("깨진 매핑 파일 → 무시하고 폴백(크래시 없음)",
+              load_camera_map(mp) == {})
 
     passed = sum(1 for _, ok in checks if ok)
     print(f"{passed}/{len(checks)} 통과")

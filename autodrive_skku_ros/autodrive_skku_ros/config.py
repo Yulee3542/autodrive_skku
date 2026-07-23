@@ -12,6 +12,17 @@ LIDAR_BAUD = 115200
 # 쪽(mission_node)이 담당한다.
 FRONT_CAMERA = 0         # /dev/video0
 REAR_CAMERA = None       # T주차용 후방 카메라 인덱스. 없으면 None
+
+# 사람이 한 번 확인한 전방/후방 카메라를 /dev/videoN 번호가 아니라 안정 식별자
+# (/dev/v4l/by-id 이름)로 저장해 두는 파일 — 번호는 재부팅/재연결마다 바뀌고,
+# 노트북 내장캠이 video0을 먼저 가져가는 사례가 실차에서 반복 확인됐다.
+# `python3 tools/pick_camera.py`로 생성/갱신하고 bringup.launch.py가 자동으로
+# 우선 사용한다(파일이 없으면 기존 autodetect 동작 그대로 — 회귀 없음).
+# 환경변수 AUTODRIVE_CAMERA_MAP으로 덮어쓸 수 있다.
+CAMERA_MAP_PATH = os.environ.get(
+    "AUTODRIVE_CAMERA_MAP",
+    os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "config", "cameras.json"))
 CAMERA_SPLIT = True      # False면 mission_node가 top/bottom 양쪽에 원본 프레임을 그대로 전달
 FRAME_WIDTH = 640        # 캡처 요청 해상도 — 센서 네이티브(랜드스케이프) 기준, 회전 전
 FRAME_HEIGHT = 480
