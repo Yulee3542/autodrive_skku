@@ -172,7 +172,7 @@ ros2 run autodrive_skku_ros mission_node
 6. 시리얼 케이블을 뽑아 500ms 내 정지(워치독) 확인
 7. (POT 장착 차량만) 기동 로그에서 "조향 캘리브레이션 완료: adc_left=..., adc_right=..." 확인, `/car/steering_angle`(Foxglove)이 조향 펄스에 따라 바뀌는지 확인
 8. Foxglove에서 `/debug/lane_poi` 오버레이 확인 — 이제 원본 프레임이 아니라 BEV(원근변환)로 워프된 캔버스에 그린다(2026-07-23). 밴드 안에 차선 클러스터가 잡히고 청록색 lookahead 원이 차선을 따라가는지, 하단 텍스트의 `delta=`(조향각)가 커브에서 커지는지 확인. 안 잡히면 `ros2 param set /mission_node lane_poi.v_min_floor <값>`으로 조명에 맞게 라이브 튜닝(Otsu 적응 임계의 바닥값), 사다리꼴 자체(`lane_poi.src_frac`)가 안 맞으면 [Pure-Pursuit/BEV 캘리브레이션](#pure-pursuit-bev-캘리브레이션) 참고 ([실차 튜닝](#실차-튜닝-ros2-param))
-9. (traffic) `/debug/stop_line` 바그래프를 실제 정지선 앞에서 확인 — 정지선에서 빨간 행이 연속으로 나오고 횡단보도에서는 안 나오는지
+9. (traffic) `/debug/stop_line` 바그래프를 실제 정지선 앞에서 확인 — 정지선에서 빨간 행이 연속으로 나오고 횡단보도에서는 안 나오는지. 이어서 **빨간불에서 정지선에 맞춰 서는지** 확인: 빨간불이 확정되면 콘솔에 `빨간불 — 정지선까지 저속 접근`이 뜨고 `speed.slow`로 감속해 굴러가다 정지선에서 서야 한다. 정지선 한참 앞에서 서면 `정지선 미검출 — 접근 시간 초과` 메시지가 같이 떴을 것이므로 정지선 검출(`stop_line.*`)부터 고칠 것. 반대로 정지선을 넘어가면 `ros2 param set /mission_node stop_line.approach_max_s <값>`을 줄인다 (신호등이 보이기 시작하는 지점~정지선 거리와 `speed.slow`에 맞춰 실측 튜닝)
 10. (오도메트리 활성화하려면) `pwm_to_mps` 실측: `teleop_node`를 띄우고 **`t`** 키 → PWM 입력 → 3초 카운트다운 후 정확히 5초 주행하고 스스로 멈춘다 → 출발 표시부터 정지 위치까지 줄자로 재서 cm로 입력. PWM을 바꿔 3점 이상(예: 60 / 100 / 150) 모으면 데드존까지 나오고, 마지막에 그대로 붙여넣을 `ros2 param set /odometry_node odometry.pwm_to_mps <값>` 명령이 출력된다 ([PWM 캘리브레이션](#pwm-캘리브레이션-teleop-t) 참고). 카메라 높이/틸트도 실측해 `camera_mount.height_m`/`camera_mount.tilt_deg` 입력 → `/car/pose_confidence`가 0보다 커지는지 확인
 11. (t_parking) 넓은 공터에서 전체 사이클 확인 — MAP_BUILD→…→HOLD(3~5초)→EXIT(출차)→차선유지. 손은 항상 킬스위치(Ctrl+C)에. 오도메트리 미보정 상태에서도 기존과 동일하게 동작해야 정상(격자/거리 조건은 자동 비활성)
 12. 세션 종료 전 `python3 tools/dump_tuning.py` — 이날 튜닝한 값을 YAML로 뽑고, diff를 소스 dict에 반영해 커밋
@@ -242,7 +242,7 @@ WSL2에서 개발 중이면 Windows 쪽 Foxglove 앱은 WSL 내부 IP(`ip addr s
 | 미션 | 세부 목표 | 상태 |
 |------|-----------|------|
 | `road` 도로 주행 | ① 직진·스티어링 ② 차선 인식 주행(BEV + Pure-Pursuit, 2026-07-23) ③ 차선 변경 ④ 장애물 회피 차선 변경 | ①② 동작 / ③④ 테스트 구현 (실차 튜닝 대상). ③④는 오도메트리 보정 시 거리 기반 종료(`out_m`/`back_m`)도 가능 |
-| `traffic` 신호등 주행 | ① 정지선 인식 ② 신호등 라이트 인식(YOLO 1순위 + HSV 폴백, 연속 프레임 디바운스) | ② 동작 / ① 테스트 구현 (실차 튜닝 대상) |
+| `traffic` 신호등 주행 | ① 정지선 인식 ② 신호등 라이트 인식(YOLO 1순위 + HSV 폴백, 연속 프레임 디바운스) | ② 동작 / ① 테스트 구현 (실차 튜닝 대상). 빨간불을 보면 그 자리에서 멈추지 않고 **정지선까지 저속 접근 후 정지**(2026-07-27) — `stop_line.approach_max_s` 안에 정지선을 못 찾으면 페일세이프로 그 자리 정지 |
 | `t_parking` T 주차 | ① 라이다 맵 빌딩(+점유 격자) ② 후방캠 주차선 인식(+라이다 슬롯 서보잉 대체) ③ 후진 차선 주행 ④ T주차 알고리즘 ⑤ 출차 후 OUT 통과 | ①~⑤ 테스트 구현 (실차 튜닝 대상). 상태머신 MAP_BUILD→FIND_SLOT→REVERSE_ALIGN→PARK→EXIT→LANE_FOLLOW\|DONE. 출차는 규정 필수(출차실패 f7 −30, OUT 도착실패 f8 −40) — `exit_mode`('lane'=출차 후 차선유지 주행/'stop'=정지), `exit_enabled=false`면 기존처럼 HOLD 후 정지 |
 | `test` 수동 테스트 | 자동주행 없음 — 미션 자체가 키보드 텔레옵 조종(`ros2 run`으로 직접 실행 필요) | 동작 |
 

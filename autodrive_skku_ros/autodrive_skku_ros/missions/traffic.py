@@ -41,6 +41,12 @@ STOP_LINE = dict(
     min_rows=6,            # 연속으로 임계를 넘어야 하는 행 수
     wait_max_s=6.0,        # 정지선 대기 중 신호등 미검출 시 재출발까지 시간 (교착 방지)
     cooldown_s=3.0,        # 재출발 후 같은 정지선 재트리거 억제
+    # 📏 빨간불을 보고 정지선까지 저속 접근하는 최대 시간. 이 시간 안에 정지선을
+    # 못 찾으면 신호 위반을 막기 위해 그 자리에서 정지한다(페일세이프). 너무 짧으면
+    # 정지선 한참 앞에서 서고, 너무 길면 정지선 미검출 시 교차로로 들어간다 —
+    # 신호등이 보이기 시작하는 지점부터 정지선까지의 실제 거리와 SLOW_SPEED로
+    # 실차 튜닝할 것. 접근 속도는 config.SLOW_SPEED(speed.slow)를 그대로 쓴다.
+    approach_max_s=5.0,
     # 흰색 판정은 vision.white_mask(Otsu 적응 임계)를 lane_follow와 공유한다
     # (2026-07-23). 고정 임계(white_v_min=180)로는 어두운 트랙 조명에서 정지선을
     # 통째로 놓치는 게 실측 확인됐다. v_min_floor는 white_v_min과 의미가 다르니
@@ -105,7 +111,15 @@ class TrafficMission(Mission):
       (2) 신호등 라이트 인식 — 동작 (YOLO 1순위 + HSV 픽셀 비율 폴백)
 
     동작: 차선 추종 주행 중 정지선을 만나면 정지, 초록불이면 다시 출발.
-    빨간불은 언제든 정지 (main3 검증 로직과 동일).
+
+    빨간불 처리 (2026-07-27 변경): 예전에는 빨간불이 확정되는 즉시 그 자리에서
+    멈췄다(main3 로직). 그런데 신호등은 정지선보다 한참 앞에서 보이기 시작하므로
+    실제로는 정지선 훨씬 앞에 서버린다 — 정지선에 맞춰 서야 하는 규정에 어긋난다.
+    이제는 빨간불을 보면 **정지선까지 config.SLOW_SPEED로 저속 접근**하고
+    (차선 추종은 계속), 정지선을 만나면 그때 멈춘다.
+    페일세이프: 접근 시작 후 STOP_LINE["approach_max_s"] 안에 정지선을 못 찾으면
+    신호 위반을 막기 위해 그 자리에서 정지한다 — "빨간불에 절대 안 넘어간다"는
+    기존 보장은 그대로 유지된다(정지 위치만 정지선 쪽으로 옮긴 것).
 
     신호등 색 판정 (TRAFFIC_LIGHT 튜닝값, `_detect_light_color` 참고):
       YOLO(1순위, `traffic_yolo.detect_light_color_yolo`)가 이번 프레임에 확정
@@ -117,12 +131,14 @@ class TrafficMission(Mission):
       연속 green이어야(red보다 엄격 — 비대칭) 재출발한다. 빨간불에서 잘못
       출발하면 규정 감점이지만 초록불에서 늦게 출발하는 건 손해가 없기 때문.
 
-    대기 상태 구분 (wait):
+    대기 상태 구분 (wait) — 둘 다 "이미 멈춰 서 있는" 상태다:
       "red"  — 빨간불을 본 대기. 초록불이 뜰 때까지 무기한 대기
                (빨간불 출발은 규정 감점이라 타임아웃 없음).
-      "line" — 정지선 대기. 초록불이면 출발, 신호등이 아예 안 보이면
-               wait_max_s 후 경고 출력 후 재출발 (교착 방지 가드 —
-               규정상 감점 여지가 있어 wait_max_s는 팀 확인 필요).
+      "line" — 신호등은 안 보이는데 정지선을 만나 선 상태. 초록불이면 출발,
+               신호등이 계속 안 보이면 wait_max_s 후 경고 출력 후 재출발
+               (교착 방지 가드 — 규정상 감점 여지가 있어 wait_max_s는 팀 확인 필요).
+               대기 중 빨간불이 확정되면 "red"로 승격되어 타임아웃이 사라진다.
+    접근 상태(approach_t0)는 wait과 별개다 — 아직 달리고 있기 때문이다.
     재출발 직후에는 cooldown_s 동안 같은 정지선에 재정지하지 않는다.
     """
 
@@ -133,8 +149,9 @@ class TrafficMission(Mission):
         self.debug = {}
         self._lane_tracker = LaneCenterTracker()
         self._now = time.monotonic  # 테스트에서 가짜 시계 주입 지점
-        self.wait = None            # None | "line" | "red"
+        self.wait = None            # None | "line" | "red" (둘 다 정지 상태)
         self.wait_t0 = 0.0
+        self.approach_t0 = None     # 빨간불 보고 정지선까지 저속 접근 시작 시각
         self.cooldown_until = 0.0
         self._red_streak = 0
         self._green_streak = 0
@@ -171,11 +188,13 @@ class TrafficMission(Mission):
         color = "red" if self._red_streak >= TRAFFIC_LIGHT["red_confirm_n"] else \
             "green" if self._green_streak >= TRAFFIC_LIGHT["green_confirm_n"] else None
 
-        if color == "red" and self.wait != "red":
-            self.wait = "red"
-            self.wait_t0 = now
-
+        # ---- 이미 멈춰 서 있는 경우 ----
         if self.wait is not None:
+            # 정지선에서 선 뒤에 빨간불이 확정되면 "red"로 승격 — 타임아웃이
+            # 사라져 초록불까지 무기한 기다린다.
+            if color == "red" and self.wait != "red":
+                self.wait = "red"
+                self.wait_t0 = now
             car.drive(0)
             if color == "green":
                 self._resume(car, now)
@@ -185,23 +204,56 @@ class TrafficMission(Mission):
                 self._resume(car, now)
             return
 
+        # ---- 주행 중 ----
+        # 빨간불을 봐도 그 자리에서 멈추지 않는다 — 신호등은 정지선보다 한참
+        # 앞에서 보이기 시작하므로, 정지선까지 저속으로 접근한 뒤 거기서 선다.
+        if color == "red" and self.approach_t0 is None and now >= self.cooldown_until:
+            self.approach_t0 = now
+            print("[traffic] 빨간불 — 정지선까지 저속 접근")
+        elif color == "green" and self.approach_t0 is not None:
+            # 접근 중 초록불로 바뀌면 설 이유가 없다 — 정상 속도로 복귀.
+            self.approach_t0 = None
+            print("[traffic] 초록불로 바뀜 — 접근 취소, 정상 주행")
+
         stop_dbg = {}
         stop_hit = self.stop_line_detected(sensors.get("bottom"), debug=stop_dbg)
         self.debug["stop_line"] = stop_dbg
         if now >= self.cooldown_until and stop_hit:
-            self.wait = "line"
+            # 접근 중(=빨간불을 봤음)에 만난 정지선이면 "red"로 서서 초록불까지
+            # 무기한 기다린다. 그냥 정지선만 만난 거라면 기존대로 "line".
+            self.wait = "red" if (color == "red" or self.approach_t0 is not None) else "line"
             self.wait_t0 = now
+            self.approach_t0 = None
+            car.drive(0)
+            return
+
+        # 페일세이프: 정지선을 못 찾은 채 너무 오래 접근하면 그 자리에서라도
+        # 선다 — "빨간불에 절대 넘어가지 않는다"는 보장을 유지하기 위해서다.
+        # 정지선 검출이 실패해도 최악의 결과가 "조금 일찍 정지"에 머무른다.
+        if self.approach_t0 is not None and \
+                now - self.approach_t0 >= STOP_LINE["approach_max_s"]:
+            print("[traffic] 정지선 미검출 — 접근 시간 초과, 현재 위치에서 정지")
+            self.wait = "red"
+            self.wait_t0 = now
+            self.approach_t0 = None
             car.drive(0)
             return
 
         # follow_lane_poi가 곡률에 따라 속도를 다시 내리므로(감속) 여기 drive는
         # "프레임이 없어 follow_lane_poi가 조기 반환할 때"의 기본값 역할이다.
-        car.drive(self.config.DRIVE_SPEED)
+        approaching = self.approach_t0 is not None
+        car.drive(self.config.SLOW_SPEED if approaching else self.config.DRIVE_SPEED)
         self.debug["lane_poi"] = follow_lane_poi(
             self._lane_tracker, car, sensors.get("bottom"), LANE_POI, now=self._now)
+        if approaching:
+            # follow_lane_poi는 곡률에 따라 DRIVE_SPEED~SLOW_SPEED 사이로 자체
+            # drive()를 부르므로, 접근 속도를 지키려면 그 뒤에서 덮어써야 한다.
+            # (그 출력은 항상 SLOW_SPEED 이상이라 이 덮어쓰기는 언제나 감속이다.)
+            car.drive(self.config.SLOW_SPEED)
 
     def _resume(self, car, now):
         self.wait = None
+        self.approach_t0 = None
         self.cooldown_until = now + STOP_LINE["cooldown_s"]
         car.drive(self.config.DRIVE_SPEED)
 

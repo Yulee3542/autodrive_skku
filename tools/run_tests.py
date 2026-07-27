@@ -123,7 +123,8 @@ def _run_lane_follow():
 
 def _run_traffic():
     m = _load("smoke_test_missions")
-    return all([m.test_traffic_fsm(), m.test_vendor_fallback_sync()])
+    return all([m.test_traffic_fsm(), m.test_traffic_red_approach(),
+                m.test_vendor_fallback_sync()])
 
 
 def _run_road():

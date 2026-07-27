@@ -276,10 +276,21 @@ def test_traffic_fsm():
     for _ in range(TRAFFIC_LIGHT["red_confirm_n"] - 1):
         m.step(sensors(top=color_frame((0, 0, 255)), bottom=blank()), car)
     ok &= check(f"빨간불 {TRAFFIC_LIGHT['red_confirm_n'] - 1}프레임(확정 전) → 아직 주행",
-                m.wait is None)
+                m.wait is None and m.approach_t0 is None
+                and car.drives[-1] == config.DRIVE_SPEED)
+
+    # 2026-07-27 변경: 빨간불 확정 = 즉시 정지가 아니라 "정지선까지 저속 접근".
+    # 신호등은 정지선보다 한참 앞에서 보이므로 예전 동작은 정지선 훨씬 앞에 섰다.
     m.step(sensors(top=color_frame((0, 0, 255)), bottom=blank()), car)
-    ok &= check(f"빨간불 {TRAFFIC_LIGHT['red_confirm_n']}프레임 연속 → 정지 + wait='red'",
-                m.wait == "red" and car.drives[-1] == 0)
+    ok &= check(f"빨간불 {TRAFFIC_LIGHT['red_confirm_n']}프레임 연속 → 즉시 정지가 아니라 "
+                "정지선까지 저속 접근",
+                m.wait is None and m.approach_t0 is not None
+                and car.drives[-1] == config.SLOW_SPEED)
+
+    # 접근 중 정지선을 만나면 그때 정지 — 신호등을 봤으므로 'red'(무기한 대기)
+    m.step(sensors(top=color_frame((0, 0, 255)), bottom=stop_line_frame()), car)
+    ok &= check("접근 중 정지선 도달 → 정지 + wait='red'",
+                m.wait == "red" and m.approach_t0 is None and car.drives[-1] == 0)
 
     clk.advance(60.0)
     m.step(sensors(bottom=blank()), car)
@@ -293,6 +304,70 @@ def test_traffic_fsm():
     m.step(sensors(top=color_frame((0, 255, 0)), bottom=blank()), car)
     ok &= check(f"초록불 {TRAFFIC_LIGHT['green_confirm_n']}프레임 연속 → 재출발",
                 m.wait is None and car.drives[-1] == config.DRIVE_SPEED)
+    return ok
+
+
+# ---- 2a. traffic 미션: 빨간불 -> 정지선까지 접근 (2026-07-27 동작 변경) ----
+
+def _approaching_mission():
+    """빨간불이 확정되어 정지선 접근 중인 미션/차/시계를 만들어 돌려준다."""
+    m, car, clk = TrafficMission(), FakeCar(), FakeClock()
+    m.on_start(car, config)
+    m._now = clk
+    m._yolo_model = None
+    for _ in range(TRAFFIC_LIGHT["red_confirm_n"]):
+        m.step(sensors(top=color_frame((0, 0, 255)), bottom=blank()), car)
+    return m, car, clk
+
+
+def test_traffic_red_approach():
+    """빨간불을 봐도 그 자리에서 멈추지 않고 정지선까지 저속 접근하는지.
+
+    예전에는 빨간불 확정 즉시 정지였다(main3 로직). 신호등은 정지선보다 한참
+    앞에서 보이기 시작하므로 실제로는 정지선 훨씬 앞에 서버려서, 정지선에
+    맞춰 서야 하는 규정에 어긋났다. 다만 "빨간불에 절대 넘어가지 않는다"는
+    보장은 유지돼야 하므로 페일세이프(approach_max_s)를 함께 검증한다."""
+    print("== traffic 빨간불 → 정지선 접근 (즉시 정지 아님) ==")
+    ok = True
+
+    m, car, clk = _approaching_mission()
+    ok &= check("빨간불 확정 → 정지하지 않고 접근 시작",
+                m.wait is None and m.approach_t0 is not None)
+    ok &= check("접근 중에는 정지(0)를 내리지 않고 SLOW_SPEED로 계속 주행",
+                car.drives[-1] == config.SLOW_SPEED and 0 not in car.drives)
+    ok &= check("접근 속도는 정상 주행 속도보다 느림",
+                config.SLOW_SPEED < config.DRIVE_SPEED)
+
+    # 접근 제한 시간 직전까지는 계속 접근
+    clk.advance(STOP_LINE["approach_max_s"] - 0.1)
+    m.step(sensors(top=color_frame((0, 0, 255)), bottom=blank()), car)
+    ok &= check("제한 시간 전에는 계속 접근 (아직 정지 안 함)",
+                m.wait is None and m.approach_t0 is not None and car.drives[-1] != 0)
+
+    # 페일세이프: 정지선을 끝내 못 찾으면 그 자리에서라도 정지 (신호 위반 방지)
+    clk.advance(0.2)
+    m.step(sensors(top=color_frame((0, 0, 255)), bottom=blank()), car)
+    ok &= check("정지선 미검출로 제한 시간 초과 → 현재 위치에서 정지 (신호 위반 방지)",
+                m.wait == "red" and m.approach_t0 is None and car.drives[-1] == 0)
+
+    # 접근 중 초록불로 바뀌면 설 이유가 없다 → 정상 주행 복귀
+    m2, car2, _ = _approaching_mission()
+    for _ in range(TRAFFIC_LIGHT["green_confirm_n"] - 1):
+        m2.step(sensors(top=color_frame((0, 255, 0)), bottom=blank()), car2)
+    ok &= check("초록불 확정 전에는 접근을 계속 (비대칭 디바운스 유지)",
+                m2.approach_t0 is not None and car2.drives[-1] == config.SLOW_SPEED)
+    m2.step(sensors(top=color_frame((0, 255, 0)), bottom=blank()), car2)
+    ok &= check("접근 중 초록불 확정 → 접근 취소, 정상 속도 복귀",
+                m2.approach_t0 is None and m2.wait is None
+                and car2.drives[-1] == config.DRIVE_SPEED and 0 not in car2.drives)
+
+    # 신호등 없이 정지선만 만난 경우는 기존대로 'line' (타임아웃 있는 대기)
+    m3, car3, _ = TrafficMission(), FakeCar(), FakeClock()
+    m3.on_start(car3, config)
+    m3._yolo_model = None
+    m3.step(sensors(bottom=stop_line_frame()), car3)
+    ok &= check("신호등 없이 정지선만 → 기존대로 wait='line' (회귀 가드)",
+                m3.wait == "line" and m3.approach_t0 is None and car3.drives[-1] == 0)
     return ok
 
 
@@ -613,6 +688,7 @@ def main():
         test_dim_lighting_detectors(),
         test_vendor_fallback_sync(),
         test_traffic_fsm(),
+        test_traffic_red_approach(),
         test_traffic_yolo_priority_and_fallback(),
         test_road_lane_change(),
         test_lane_change_distance_mode(),
