@@ -36,6 +36,19 @@ except ImportError:
 # 인한 휠슬립·드리프트를 완화한다. 📏 실차 튜닝 대상.
 SPEED_RAMP_S = 0.5
 
+# 커맨드 워치독 — drive()가 이 시간 이상 안 오면 정지(선배(taegyu) auto_drive_py
+# 프로젝트 control/controller.py의 command_timeout_s 레이어 이식, 2026-08-03).
+#
+# 기존에는 펌웨어의 500ms "통신 두절" 워치독 하나뿐이었는데, _keepalive_tick이
+# 200ms마다 self._speed(마지막 목표값)를 계속 재전송하므로 그 워치독은 언제나
+# 만족돼 있다 — 미션 프로세스가 멎거나 죽어도(카메라 프리징, 예외로 미션 루프
+# 탈출 등) ArduinoNode 자신의 keepalive 스레드는 아무것도 모른 채 마지막 속도로
+# 계속 달리게 만든다. 이건 "통신은 살아있지만 명령을 내리는 쪽이 죽은" 경우라
+# 펌웨어 워치독이 원리적으로 잡을 수 없는 구멍이다.
+# LOOP_HZ=30(약 33ms/틱)의 몇 배 여유를 두어 정상적인 스케줄링 지연/GC pause
+# 등으로 오작동하지 않게 한다. 📏 실차 튜닝 대상.
+COMMAND_TIMEOUT_S = 0.5
+
 
 def cubic_trajectory(t, duration, v0, v1):
     """Cubic Polynomial Trajectory — 경계조건 x(0)=v0, x(T)=v1, ẋ(0)=ẋ(T)=0
@@ -55,7 +68,10 @@ class ArduinoNode:
     (검증된 main3 방식), 펄스를 반복해야 하는 기동은 steer_pulse()를 쓴다.
 
     펌웨어 워치독(500ms)이 통신 두절 시 차를 세우도록 수신 스레드가 200ms마다
-    현재 속도를 keepalive로 재전송한다.
+    현재 속도를 keepalive로 재전송한다. 이 keepalive 자체가 "미션이 살아
+    있는지"는 보지 않으므로(마지막 목표값을 영원히 재전송할 뿐), 커맨드
+    워치독(COMMAND_TIMEOUT_S)이 그 위 계층에서 "drive()가 계속 오고 있는지"를
+    따로 지켜본다 — 둘 다 독립적으로 차를 세울 수 있는 별개 안전망이다.
     """
 
     def __init__(self, port, baud=9600):
@@ -70,6 +86,7 @@ class ArduinoNode:
         self._lock = threading.Lock()
         self._running = False
         self._stop_after_ramp = False  # stop() 예약 — 램프가 0에 닿으면 keepalive가 S를 보냄
+        self._last_command_time = None  # drive() 마지막 호출 시각 — 커맨드 워치독(COMMAND_TIMEOUT_S)용
 
         if serial is None:
             print("[arduino] pyserial 미설치 — 차량 제어 없이 실행")
@@ -113,7 +130,15 @@ class ArduinoNode:
         """200ms keepalive 1스텝 — 목표 속도로 램프하며 V를 보내고, stop()이
         예약한 "램프 완료 후 정지 게이트(S)"를 여기서 완수한다. _loop()
         스레드 본문에서 분리해뒀다 — 포트 없는 오프라인 셀프테스트에서도
-        스레드 없이 직접 호출해 검증할 수 있다."""
+        스레드 없이 직접 호출해 검증할 수 있다.
+
+        커맨드 워치독(COMMAND_TIMEOUT_S, 2026-08-03 추가)도 여기서 함께 본다 —
+        drive()가 그 시간 이상 안 왔는데 목표 속도가 0이 아니면 미션 레이어가
+        멎었다고 보고 stop()을 직접 호출한다. 클래스 상단 주석 참고."""
+        if (self._last_command_time is not None and self._speed_target != 0
+                and now - self._last_command_time >= COMMAND_TIMEOUT_S):
+            print(f"[arduino] 커맨드 워치독: {COMMAND_TIMEOUT_S}s 이상 drive() 없음 — 정지")
+            self.stop()
         self._speed = self._ramped_speed(now)
         self._write(f"V{self._speed}\n")
         if self._stop_after_ramp and self._speed == 0:
@@ -139,18 +164,23 @@ class ArduinoNode:
         self._stop_after_ramp = False  # 재출발 — 대기 중이던 정지 게이트 예약 취소
         self._send_once("gate", "G")
 
-    def drive(self, speed):
+    def drive(self, speed, now=None):
         """부호 있는 속도 목표 지정. 음수 = 후진. 실제 전송(keepalive)은 이
         목표까지 Cubic Polynomial Trajectory(SPEED_RAMP_S초)로 부드럽게
         램프한다 — 급가속/급정지로 인한 휠슬립·드리프트 완화. 같은 목표값
         연속 호출은 램프를 재시작하지 않는다(미션이 매 틱 같은 속도로
-        drive()를 부르므로)."""
+        drive()를 부르므로 — 이 "매 틱 호출"이 바로 아래 커맨드 워치독이
+        지켜보는 신호다).
+
+        now: 테스트에서 가짜 시계를 주입하는 지점(2026-08-03, 커맨드 워치독
+        도입과 함께 추가) — 실제 운영에서는 항상 None이라 time.time()을 쓴다."""
         target = max(-255, min(255, int(speed)))
         if target != self._speed_target:
             self._speed_ramp_from = self._speed
             self._speed_ramp_t0 = time.time()
             self._speed_target = target
         self._stop_after_ramp = False  # 정상 주행 재개 — 대기 중이던 정지 게이트 예약 취소
+        self._last_command_time = now if now is not None else time.time()
 
     def _ramped_speed(self, now):
         if self._speed_target == self._speed_ramp_from:
@@ -535,11 +565,19 @@ def selftest():
           car._speed == 0 and not car._stop_after_ramp and writes[-2:] == ["V0\n", "S"])
 
     writes.clear()
-    car.drive(50)
+    fake_now = time.time()
+    car.drive(50, now=fake_now)
     car.stop()
-    car.drive(80)  # 램프 도중 다시 drive() -> 예약된 정지 게이트는 취소돼야 함
-    for _ in range(10):
-        car._keepalive_tick(time.time() + SPEED_RAMP_S + 1)
+    car.drive(80, now=fake_now)  # 램프 도중 다시 drive() -> 예약된 정지 게이트는 취소돼야 함
+    # 실제 미션처럼 매 틱 drive()를 재호출해 커맨드 워치독을 계속 살려두면서
+    # (COMMAND_TIMEOUT_S 안쪽 보폭으로) 시간을 전진시킨다 — fake_now/실제
+    # time.time()를 섞어 쓰면(예: time.time()+SPEED_RAMP_S+1 한 번에 점프)
+    # drive()가 계속 오고 있는 정상 상황에서도 커맨드 워치독이 오작동한다.
+    step = COMMAND_TIMEOUT_S / 4
+    for _ in range(int((SPEED_RAMP_S + 1) / step) + 1):
+        fake_now += step
+        car.drive(80, now=fake_now)
+        car._keepalive_tick(fake_now)
     check("stop() 이후 drive()가 오면 예약된 정지 게이트(S)를 취소",
           not car._stop_after_ramp and "S" not in writes)
 
@@ -671,6 +709,44 @@ def selftest():
     span_for_publish = int(round(abs(adc_left3 - adc_right3)))
     check("int(round(...)) 캐스팅 후에는 진짜 int (Int32에 안전하게 발행 가능)",
           type(span_for_publish) is int)
+
+    # ---- 커맨드 워치독 (COMMAND_TIMEOUT_S, 2026-08-03) ----
+    # 미션 레이어가 매 틱 drive()를 부르는 동안은 keepalive만으로 계속 달리고,
+    # 그게 끊기면(미션 프로세스가 죽거나 멎음) 펌웨어 워치독과 별개로
+    # ArduinoNode 스스로 정지시켜야 한다.
+    wd_car = ArduinoNode(port=None)
+    wd_writes = []
+    wd_car._write = lambda text: wd_writes.append(text)
+    t0 = time.time()
+    wd_car.drive(100, now=t0)
+    wd_car._keepalive_tick(t0)
+    check("drive() 직후 -> 아직 워치독 안 걸림(속도 그대로)",
+          wd_car._speed_target == 100 and "S" not in wd_writes)
+
+    stale_now = t0 + COMMAND_TIMEOUT_S + 0.05
+    wd_car._keepalive_tick(stale_now)
+    # 이 시점에서 실제 _speed는 아직 거의 0이었으므로(직전 틱 한 번만 지남)
+    # stop()의 램프 시작점(_speed_ramp_from)도 0 -> 램프 없이 즉시 정지 게이트(S)까지
+    # 이 한 틱 안에서 완료된다(_stop_after_ramp도 이미 False로 되돌아옴 — 정상).
+    check(f"drive() 없이 COMMAND_TIMEOUT_S({COMMAND_TIMEOUT_S}s) 초과 -> "
+          "stop() 트리거돼 실제로 정지 게이트(S)까지 나감",
+          wd_car._speed_target == 0 and "S" in wd_writes)
+
+    idle_car = ArduinoNode(port=None)
+    idle_writes = []
+    idle_car._write = lambda text: idle_writes.append(text)
+    idle_car._keepalive_tick(time.time() + 10)
+    check("애초에 drive()를 한 번도 안 부른 차 -> 워치독 미무장(오작동 없음)",
+          not idle_car._stop_after_ramp and idle_writes == ["V0\n"])
+
+    zero_car = ArduinoNode(port=None)
+    zero_writes = []
+    zero_car._write = lambda text: zero_writes.append(text)
+    t1 = time.time()
+    zero_car.drive(0, now=t1)  # 목표 속도가 이미 0 -> 워치독이 볼 게 없음
+    zero_car._keepalive_tick(t1 + COMMAND_TIMEOUT_S + 1)
+    check("목표 속도가 이미 0이면(정지 상태) 워치독이 트리거하지 않음",
+          not zero_car._stop_after_ramp and "S" not in zero_writes)
 
     passed = sum(1 for _, ok in checks if ok)
     print(f"{passed}/{len(checks)} 통과")

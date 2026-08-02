@@ -26,8 +26,10 @@ except ImportError as e:
 
 from autodrive_skku_ros.missions.lane_follow import (
     follow_lane, follow_lane_poi, analyze_lane_poi, LaneCenterTracker, LANE_POI,
-    _fit_lane_circle, _circle_x_at_y, _classify_lane_type, _poi_pick_right_lane_center)
+    _fit_lane_circle, _circle_x_at_y, _classify_lane_type, _poi_pick_right_lane_center,
+    _pure_pursuit_delta_deg)
 from autodrive_skku_ros.vendor import Function_Library as fl
+from autodrive_skku_ros.calibration.ground_projection import CameraIntrinsics, GroundProjection
 
 
 class FakeCar:
@@ -485,6 +487,86 @@ def test_pure_pursuit_gain_not_saturating():
     return ok
 
 
+def _make_bev_ground_projection(bev_w, bev_h):
+    """테스트용 GroundProjection — BEV 픽셀 (u,v) -> 차량미터 (x=전방,y=좌측)의
+    알려진 선형 매핑으로 합성한다(세로/가로 스케일을 서로 다르게 둬서, 단일
+    px_per_m 스칼라로는 재현 못 하는 비등방 변환임을 회귀가드로 확인할 수 있게).
+    u=0..bev_w -> y=+1.5..-1.5m, v=0(위/멀리)..bev_h(아래/차 바로 앞) -> x=3..0.2m."""
+    us = [0.0, bev_w / 2.0, bev_w]
+    vs = [0.0, bev_h / 2.0, bev_h]
+    image_pts, ground_pts = [], []
+    for v in vs:
+        for u in us:
+            image_pts.append((u, v))
+            x = 3.0 - (v / bev_h) * 2.8   # v=0 -> x=3.0(멀리), v=bev_h -> x=0.2(가까이)
+            y = 1.5 - (u / bev_w) * 3.0   # u=0 -> y=+1.5(좌), u=bev_w -> y=-1.5(우)
+            ground_pts.append((x, y))
+    intr = CameraIntrinsics.identity(bev_w, bev_h)
+    projection, _report = GroundProjection.fit(image_pts, ground_pts, intr, revision="smoke-test")
+    return projection
+
+
+def test_pure_pursuit_uses_ground_projection_when_available():
+    """회귀가드: ground_projection이 주어지면 _pure_pursuit_delta_deg가 그
+    호모그래피로 변환해야 하고(px_per_m 스칼라 결과와 달라야 함 — 이 테스트
+    fixture는 축별 배율이 다르게 합성했으므로), 없으면(기존과 동일) px_per_m
+    스칼라 결과를 그대로 내야 한다."""
+    print("== _pure_pursuit_delta_deg: ground_projection 있을 때/없을 때 ==")
+    ok = True
+    cfg = LANE_POI
+    bev_w, bev_h = cfg["bev_w"], cfg["bev_h"]
+    # 목표점 하나(중심에서 좌측으로 20px, 중간 높이) — 둘 다 포화(±STEERING_LIMIT_DEG)
+    # 안 걸리는 지점이어야 "값이 다르다"는 비교가 의미 있다(너무 가깝거나
+    # 치우친 점은 스칼라/호모그래피 둘 다 20도로 클램프돼 우연히 같아짐).
+    path_points = [(80, bev_w / 2.0 - 20)]
+
+    without = _pure_pursuit_delta_deg(path_points, cfg, 100.0, ground_projection=None)
+    projection = _make_bev_ground_projection(bev_w, bev_h)
+    with_proj = _pure_pursuit_delta_deg(path_points, cfg, 100.0, ground_projection=projection)
+
+    ok &= check("ground_projection 없음 -> 값 나옴(px_per_m 스칼라 경로, 기존 동작)",
+                without is not None)
+    ok &= check("ground_projection 있음 -> 값 나옴(호모그래피 경로)",
+                with_proj is not None)
+    ok &= check("두 경로의 결과가 다름 (스칼라 근사와 실제 호모그래피가 실제로 다른 "
+                "값을 낸다는 뜻 — 이게 이 캘리브레이션을 이식한 이유)",
+                without is not None and with_proj is not None
+                and abs(without - with_proj) > 0.5)
+    ok &= check("둘 다 좌측 목표 -> 둘 다 양수(부호는 유지)",
+                without > 0 and with_proj > 0)
+
+    outside = [(-1000.0, -1000.0)]  # 캘리브레이션 유효범위 밖(이미지 좌표 자체가 터무니없음)
+    rejected = _pure_pursuit_delta_deg(outside, cfg, 100.0, ground_projection=projection)
+    ok &= check("호모그래피 유효범위 밖 점만 있으면 -> None (조용한 오답 대신 "
+                "'이번 틱 목표 없음'으로 정직하게 처리)",
+                rejected is None)
+    return ok
+
+
+def test_lane_center_tracker_calibration_lazy_load_is_backward_compatible():
+    """LaneCenterTracker() 생성자 시그니처는 안 바뀜(road.py 등 기존 호출부
+    무변경) — ground_projection/latency는 첫 follow_lane_poi 호출 때 지연
+    구성된다. 캘리브레이션 파일이 없는 기본 상태에서는 None으로 확정되고
+    이후 매 틱 재시도하지 않는다(파일 I/O 반복 방지)."""
+    print("== LaneCenterTracker: 캘리브레이션 지연로딩 (하위호환 + 캐싱) ==")
+    ok = True
+    tracker = LaneCenterTracker()  # 인자 없이 생성 가능해야 함(기존 계약)
+    w, h = 640, 240
+    cfg = _identity_bev_cfg(w, h, ground_projection_path="calibration/존재하지않는파일.json")
+    car = FakeCar()
+    frame = make_two_line_frame(width=w, height=h)
+
+    follow_lane_poi(tracker, car, frame, cfg, now=FakeClock())
+    ok &= check("존재하지 않는 캘리브레이션 파일 -> ground_projection=None으로 확정",
+                tracker.ground_projection is None)
+
+    calls_before = tracker.ground_projection
+    follow_lane_poi(tracker, car, frame, cfg, now=FakeClock())
+    ok &= check("두 번째 호출도 None 유지(재시도로 인한 예외/성능저하 없음)",
+                tracker.ground_projection is calls_before is None)
+    return ok
+
+
 def main():
     results = [
         test_follow_lane_no_crash(),
@@ -500,6 +582,8 @@ def main():
         test_bev_adaptive_threshold_vs_fixed(),
         test_analyze_uses_full_height_classification(),
         test_pure_pursuit_gain_not_saturating(),
+        test_pure_pursuit_uses_ground_projection_when_available(),
+        test_lane_center_tracker_calibration_lazy_load_is_backward_compatible(),
     ]
     passed = all(results)
     print("\n결과:", "이상 없음" if passed else "위 [X] 항목 확인 필요")
