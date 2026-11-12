@@ -43,7 +43,7 @@ class DriveLogger:
 
     def log_raw(self, record):
         """임의의 dict 한 개를 그대로 JSON 한 줄로 남긴다. mission_node의 틱 로그와
-        스키마가 다른 기록(teleop 데이터셋의 프레임 단위 라벨 등)이 같은 파일
+        스키마가 다른 기록(원격 조종 데이터셋의 프레임 단위 라벨 등)이 같은 파일
         포맷·같은 라인 버퍼링을 그대로 쓰도록 하기 위한 하위 레벨 진입점."""
         self._f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
@@ -122,7 +122,7 @@ def selftest():
               and lines[1]["commands"]["steer"] == "L")
 
         # ---- log_raw: 틱 로그와 다른 스키마도 같은 파일 포맷으로 남는지 ----
-        raw_path = make_log_path(log_dir, mission="teleop_front")
+        raw_path = make_log_path(log_dir, mission="remote_control_front")
         raw_logger = DriveLogger(raw_path)
         raw_logger.log_raw({"frame": 0, "t": 5.0, "cam": "front", "steering_pot": 412})
         raw_logger.log_raw({"summary": True, "frames": 1, "fps_measured": None})

@@ -14,7 +14,7 @@ SPEED_STEP = 20
 SPEED_LIMIT = 255
 
 HELP = """
-[test 미션] 키보드 텔레옵 — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
+[test 미션] 키보드 원격 조종 — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
   ※ w/x로 속도를 줘도 먼저 g(주행 허용)를 안 보내면 차가 안 움직입니다
     (펌웨어 워치독 게이트 — s를 누르면 다시 닫히므로 그 다음엔 g부터).
   g : go (주행 허용, 반드시 먼저)   w/x : 속도 +20/-20   space : 속도 0
@@ -25,7 +25,7 @@ HELP = """
 
 class TestMission(Mission):
     """자동주행 로직 없음 — 대신 stdin을 논블로킹으로 읽어 이 미션 자체가 키보드
-    텔레옵 조종 인터페이스를 겸한다(별도 teleop_node 없이 mission:=test 선택 자체가
+    원격 조종 인터페이스를 겸한다(별도 remote_control_node 없이 mission:=test 선택 자체가
     곧 수동 조작 모드).
 
     mission_node를 'ros2 run'으로 직접 실행했을 때만 stdin이 실제 터미널에 연결된다
@@ -46,14 +46,14 @@ class TestMission(Mission):
         if termios is None:
             print("[test] termios/tty/fcntl 미지원 플랫폼 — 키보드 조종 비활성화 "
                   "(자동주행은 하지 않으니 ros2 topic pub/Foxglove Publish 패널/"
-                  "teleop_node로 계속 조종 가능합니다).")
+                  "remote_control_node로 계속 조종 가능합니다).")
             return
         if not sys.stdin.isatty():
             print("[test] stdin이 tty가 아닙니다 — 키보드 조종은 "
                   "'ros2 run autodrive_skku_ros mission_node'로 직접 실행했을 "
                   "때만 동작합니다 (ros2 launch는 자식 프로세스 stdin을 안 붙여줌, "
                   "ros2/launch#735). 자동주행은 하지 않으니 다른 방법(ros2 topic "
-                  "pub, Foxglove Publish 패널, teleop_node)으로 계속 조종 가능합니다.")
+                  "pub, Foxglove Publish 패널, remote_control_node)으로 계속 조종 가능합니다.")
             return
         self._fd = sys.stdin.fileno()
         self._old_termios = termios.tcgetattr(self._fd)

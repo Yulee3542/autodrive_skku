@@ -39,15 +39,15 @@ POSE_STALE_S = 0.5       # 이 시간 이상 /car/pose 갱신 없으면 pose_con
 # (지도 교수 피드백, 2026-07-18). launch log_dir 인자로 덮어쓸 수 있다.
 DRIVE_LOG_DIR = os.path.expanduser("~/autodrive_skku_logs")
 
-# teleop_node 수동주행 데이터셋 저장 위치. 카메라마다 <stamp>_<cam>.mp4와 같은
+# remote_control_node 수동주행 데이터셋 저장 위치. 카메라마다 <stamp>_<cam>.mp4와 같은
 # 이름의 .jsonl 사이드카가 나가고, 사이드카는 mp4 프레임 한 장당 한 줄로 그 시점의
 # 조향/속도/게이트 + 조향 POT과 camera_node가 찍은 진짜 촬영 시각을 남긴다.
-# TELEOP_RECORD_FPS는 mp4 "인코딩" 레이트일 뿐이다 — 프레임↔라벨 대응은 인덱스로
+# REMOTE_CONTROL_RECORD_FPS는 mp4 "인코딩" 레이트일 뿐이다 — 프레임↔라벨 대응은 인덱스로
 # 잡으므로 이 값이 실제 수신율과 달라도 데이터셋은 정확하고, 재생 속도만 어긋난다.
 # 세션 끝의 {"summary": true, ...} 줄에 실측 fps가 남으니 재생 속도를 맞추려면
 # ffmpeg -r <fps_measured>로 remux하면 된다.
-TELEOP_RECORD_DIR = os.path.expanduser("~/autodrive_skku_logs/teleop_recordings")
-TELEOP_RECORD_FPS = 20.0
+REMOTE_CONTROL_RECORD_DIR = os.path.expanduser("~/autodrive_skku_logs/remote_control_recordings")
+REMOTE_CONTROL_RECORD_FPS = 20.0
 
 DRIVE_SPEED = 100        # 기본 주행 속도 (-255..255, 실차 검증값)
 SLOW_SPEED = 60          # 주차 등 저속 기동 속도

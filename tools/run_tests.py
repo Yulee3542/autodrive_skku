@@ -100,10 +100,10 @@ def _run_camera_node():
     return m.selftest() == 0
 
 
-def _run_teleop():
+def _run_remote_control():
     # 수동주행 데이터셋 녹화(mp4 + 프레임별 라벨 jsonl) 순수 로직 — 실제 카메라/
     # ROS/mp4 인코더 없이 스텁 writer로 검증 (_run_lidar와 동일 패턴).
-    m = _load("autodrive_skku_ros.nodes.teleop_node")
+    m = _load("autodrive_skku_ros.nodes.remote_control_node")
     return m.selftest() == 0
 
 
@@ -179,7 +179,7 @@ MODULES = {
     "arduino": ("아두이노 시리얼 프로토콜/워치독/조향 POT 캘리브레이션 순수 함수", _run_arduino),
     "camera_node": ("카메라 캡처/상하분할/회전 보정 순수 함수 (미션 'camera'와 다름)", _run_camera_node),
     "ports": ("시리얼 포트/카메라 자동 감지 + 스테일 ROS 상태 정리", _run_ports),
-    "teleop": ("수동주행 데이터셋 녹화 (mp4 + 프레임별 라벨 jsonl 사이드카)", _run_teleop),
+    "remote_control": ("수동주행 데이터셋 녹화 (mp4 + 프레임별 라벨 jsonl 사이드카)", _run_remote_control),
     "odometry": ("오도메트리 VO+커맨드 적분 융합 순수 함수 (IEEE 5520874 기반)", _run_odometry),
     "camera": ("카메라 흰색 형태 구분 (차선/정지선/횡단보도/장애물)", _run_camera),
     "lane_follow": ("차선 추종 통합 경로 + portrait 회전 보정", _run_lane_follow),
