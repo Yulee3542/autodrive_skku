@@ -87,7 +87,7 @@ python3 tools/hw_test.py      # ⚠ 모터가 실제로 움직임 — 바퀴를 
 
 ### 5단계. 수동 조작으로 구동 확인
 
-자율주행 미션이 차를 조작하지 않는 상태에서 모터/조향을 직접 확인하고 싶으면 `mission:=test`가 가장 간단하다 — **`test` 미션 자체가 키보드 텔레옵 조종 인터페이스를 겸한다**:
+자율주행 미션이 차를 조작하지 않는 상태에서 모터/조향을 직접 확인하고 싶으면 `mission:=test`가 가장 간단하다 — **`test` 미션 자체가 키보드 원격 조종 인터페이스를 겸한다**:
 
 ```bash
 ros2 launch autodrive_skku_ros bringup.launch.py run_mission:=false
@@ -96,11 +96,11 @@ ros2 run autodrive_skku_ros mission_node --ros-args -p mission:=test
 ```
 `mission_node`처럼 실제 stdin이 필요해 반드시 `ros2 run`으로 직접 실행해야 한다. Enter 없이 키 하나로 즉시 반영된다: `g`=주행 허용, `w`/`x`=속도 +20/-20, `space`=속도 0, `a`/`d`=좌/우 조향 펄스, `f`=조향 중립, `s`=정지, `h`=도움말.
 
-별도 프로세스로 조종하고 싶으면 기존 `teleop_node`도 그대로 쓸 수 있다(어떤 미션이 떠 있든 무관하게 `/car/cmd/*`에 직접 발행 — **이걸로 모터를 움직이려면 `arduino_node`도 같이 떠 있어야 한다**, `teleop_node`는 명령을 발행만 함):
+별도 프로세스로 조종하고 싶으면 원격 조종 노드 `remote_control_node`(2026-11 `teleop_node`에서 이름 변경)도 그대로 쓸 수 있다(어떤 미션이 떠 있든 무관하게 `/car/cmd/*`에 직접 발행 — **이걸로 모터를 움직이려면 `arduino_node`도 같이 떠 있어야 한다**, `remote_control_node`는 명령을 발행만 함):
 
 ```bash
 ros2 run autodrive_skku_ros arduino_node    # 별도 터미널 — 실제 시리얼 연결 담당
-ros2 run autodrive_skku_ros teleop_node     # 조종
+ros2 run autodrive_skku_ros remote_control_node     # 조종
 ```
 
 한 번씩 스크립트로 명령을 보내고 싶으면 `ros2 topic pub`도 그대로 쓸 수 있다:
@@ -254,7 +254,7 @@ autodrive_skku/                        (git repo root — 컨테이너, 그 자�
 │   │   │   ├── mission_node.py         #   센서 구독 → sensors dict 구성 → Mission.step() 오케스트레이터
 │   │   │   │                           #   + /debug/* 오버레이 발행 (5Hz, debug.overlay 파라미터로 on/off)
 │   │   │   ├── ports.py                #   시리얼 포트 자동 감지 (ROS 비의존)
-│   │   │   └── teleop_node.py          #   /car/cmd/*에 직접 발행하는 독립 키보드 조종
+│   │   │   └── remote_control_node.py          #   /car/cmd/*에 직접 발행하는 독립 키보드 조종
 │   │   ├── missions/                   # 미션 로직 (road / traffic / t_parking / test, lane_follow 공유)
 │   │   │                               #   각 파일 상단에 그 미션의 튜닝값 (OBSTACLE_CAM/LANE_CHANGE=
 │   │   │                               #   road.py, LANE_EDGE/LANE_POI=lane_follow.py, STOP_LINE/
@@ -441,7 +441,7 @@ python3 tools/hw_test.py --forward             # 전진 모듈만
 python3 tools/hw_test.py --no-steer            # 조향만 빼고
 python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 ```
-바퀴를 지면에서 띄운 상태에서 실행할 것 — 실제로 모터가 움직인다(`car.go()`를 먼저 호출하므로 go-게이트 문제는 없음). 안 움직이면 배선/펌웨어 문제, 움직이는데 `teleop_node`/`test` 미션으로는 안 움직이면 ROS 쪽(포트 자동감지, 토픽 연결)을 의심.
+바퀴를 지면에서 띄운 상태에서 실행할 것 — 실제로 모터가 움직인다(`car.go()`를 먼저 호출하므로 go-게이트 문제는 없음). 안 움직이면 배선/펌웨어 문제, 움직이는데 `remote_control_node`/`test` 미션으로는 안 움직이면 ROS 쪽(포트 자동감지, 토픽 연결)을 의심.
 
 **2단계 — `pin_test.ino`**: 그래도 안 움직이면 시리얼 프로토콜/워치독 로직 자체를 배제하고 순수 GPIO만 확인. `digitalWrite`/`analogWrite`만으로 LEFT → RIGHT → STEER 순서로 각 채널을 1초씩 직접 돌린다(시리얼 명령 대기 없음):
 ```bash
@@ -460,7 +460,7 @@ python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 | 전/후방 카메라가 서로 바뀜 | 같은 모델(C920) 두 대면 자동 감지가 어느 쪽이 전방인지 알 수 없어 **찾은 순서대로** 배정한다 — `python3 tools/pick_camera.py`로 한 번 지정할 것. 되돌리려면 `config/cameras.json` 삭제 |
 | 뭐가 문제인지 모르겠음 / 주행이 그냥 안 됨 | `python3 tools/doctor.py` — 정적 환경 → 디스크 → ROS 노드 → 토픽 생존 → 아두이노 → 카메라 → 라이다 → 미션 순서로 어디서 끊겼는지 짚어준다. 읽기 전용이라 모터는 움직이지 않는다(구동 확인은 `hw_test.py`) |
 | 아두이노/라이다 포트 뒤바뀜 | `arduino_port:=`/`lidar_port:=` launch 인자로 직접 지정 |
-| 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `teleop_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `teleop_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |
+| 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `remote_control_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `remote_control_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |
 | 조향이 계속 한쪽으로 감 | 펄스 방식이라 자동 복원 안 됨 — 반대 방향 펄스로 복귀 필요. 중앙 정렬은 하드웨어 텐션 스프링이 담당 |
 | `ros2 launch`에서 미션 메뉴가 안 뜸/입력이 안 먹힘 | `mission:=road`처럼 launch 인자로 미리 지정할 것 — 대화형 메뉴는 `ros2 run autodrive_skku_ros mission_node`로 직접 실행할 때만 stdin이 정상 동작한다 |
 | `colcon build`에서 새 실행파일 이름이 안 보임 | [8단계](#8단계-코드-업데이트-반영-2회차-이후) 참고 — 증분 빌드가 entry_points 변경을 못 잡는 흔한 문제 |
