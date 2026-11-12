@@ -39,20 +39,20 @@ POSE_STALE_S = 0.5       # 이 시간 이상 /car/pose 갱신 없으면 pose_con
 # (지도 교수 피드백, 2026-07-18). launch log_dir 인자로 덮어쓸 수 있다.
 DRIVE_LOG_DIR = os.path.expanduser("~/autodrive_skku_logs")
 
-# teleop_node 수동주행 데이터셋 저장 위치. 카메라마다 <stamp>_<cam>.mp4와 같은
+# remote_control_node 수동주행 데이터셋 저장 위치. 카메라마다 <stamp>_<cam>.mp4와 같은
 # 이름의 .jsonl 사이드카가 나가고, 사이드카는 mp4 프레임 한 장당 한 줄로 그 시점의
 # 조향/속도/게이트 + 조향 POT과 camera_node가 찍은 진짜 촬영 시각을 남긴다.
-# TELEOP_RECORD_FPS는 mp4 "인코딩" 레이트일 뿐이다 — 프레임↔라벨 대응은 인덱스로
+# REMOTE_CONTROL_RECORD_FPS는 mp4 "인코딩" 레이트일 뿐이다 — 프레임↔라벨 대응은 인덱스로
 # 잡으므로 이 값이 실제 수신율과 달라도 데이터셋은 정확하고, 재생 속도만 어긋난다.
 # 세션 끝의 {"summary": true, ...} 줄에 실측 fps가 남으니 재생 속도를 맞추려면
 # ffmpeg -r <fps_measured>로 remux하면 된다.
-TELEOP_RECORD_DIR = os.path.expanduser("~/autodrive_skku_logs/teleop_recordings")
-TELEOP_RECORD_FPS = 20.0
+REMOTE_CONTROL_RECORD_DIR = os.path.expanduser("~/autodrive_skku_logs/remote_control_recordings")
+REMOTE_CONTROL_RECORD_FPS = 20.0
 
-# teleop 't' 키(PWM 캘리브레이션)가 (PWM, 실측거리) 점을 쌓아두는 파일. 세션마다
+# 원격 조종 't' 키(PWM 캘리브레이션)가 (PWM, 실측거리) 점을 쌓아두는 파일. 세션마다
 # 새 파일을 만드는 다른 로그들과 달리 **고정 경로에 append**한다 — 며칠에 걸쳐
 # 몇 점씩 나눠 재도 그때까지 모인 점을 전부 써서 pwm_to_mps를 적합하기 위해서다
-# (2026-07-27). 줄 스키마는 teleop_node.load_calib_samples() 참고.
+# (2026-07-27). 줄 스키마는 remote_control_node.load_calib_samples() 참고.
 PWM_CALIB_LOG = os.path.expanduser("~/autodrive_skku_logs/pwm_calib.jsonl")
 
 DRIVE_SPEED = 100        # 기본 주행 속도 (-255..255, 실차 검증값)
@@ -127,7 +127,7 @@ CAMERA_MOUNT = dict(height_m=None, tilt_deg=None)
 # 쓰지 않고 펄스 카운트 적분으로 폴백한다. 링크→기어 교체 후 스윙이 넓어지면
 # 자동으로 POT 쪽을 쓰게 된다(코드 변경 불필요).
 ODOMETRY = dict(
-    # 📏 teleop_node의 't' 키(PWM 캘리브레이션)로 측정한다 — 지정 PWM으로 5초
+    # 📏 remote_control_node의 't' 키(PWM 캘리브레이션)로 측정한다 — 지정 PWM으로 5초
     # 주행 후 실측 거리를 넣으면 원점 통과 적합값과 ros2 param set 명령을 뽑아준다.
     pwm_to_mps=None,
     deg_per_pulse=None,   # POT 폴백(펄스 카운트 적분)용. 미측정 시 조향각 0(직진)으로 취급

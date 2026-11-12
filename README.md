@@ -16,7 +16,7 @@
 | [2. WSL2에서 실행](#2단계-wsl2에서-실행-usb-연결) | usbipd로 USB 장치 4개 연결 | WSL2 개발 PC만, 세션마다 |
 | [3. 펌웨어 업로드](#3단계-펌웨어-업로드-아두이노-메가) | `car_controller.ino` 업로드 | 최초 1회 + `.ino` 변경 시마다 |
 | [4. 점검](#4단계-환경-및-하드웨어-점검) | `check_env.py` / `run_tests.py` / `doctor.py` / `hw_test.py` | 주행 전 |
-| [5. 수동 조작](#5단계-수동-조작으로-구동-확인) | 키보드 텔레옵으로 모터/조향 확인 | 첫 주행 전 |
+| [5. 수동 조작](#5단계-수동-조작으로-구동-확인) | 키보드 원격 조종으로 모터/조향 확인 | 첫 주행 전 |
 | [6. 자율주행](#6단계-자율주행-미션-실행) | `bringup.launch.py mission:=…` | 본 주행 |
 | [7. 모니터링](#7단계-foxglove-모니터링) | Foxglove로 카메라/토픽 확인 | 주행 중 |
 | [8. 코드 업데이트](#8단계-코드-업데이트-반영-2회차-이후) | `update.sh` (+ 필요시 펌웨어 재업로드) | 원격에 새 커밋이 생겼을 때 |
@@ -87,7 +87,7 @@ python3 tools/hw_test.py      # ⚠ 모터가 실제로 움직임 — 바퀴를 
 
 ### 5단계. 수동 조작으로 구동 확인
 
-자율주행 미션이 차를 조작하지 않는 상태에서 모터/조향을 직접 확인하고 싶으면 `mission:=test`가 가장 간단하다 — **`test` 미션 자체가 키보드 텔레옵 조종 인터페이스를 겸한다**:
+자율주행 미션이 차를 조작하지 않는 상태에서 모터/조향을 직접 확인하고 싶으면 `mission:=test`가 가장 간단하다 — **`test` 미션 자체가 키보드 원격 조종 인터페이스를 겸한다**:
 
 ```bash
 ros2 launch autodrive_skku_ros bringup.launch.py run_mission:=false
@@ -96,22 +96,22 @@ ros2 run autodrive_skku_ros mission_node --ros-args -p mission:=test
 ```
 `mission_node`처럼 실제 stdin이 필요해 반드시 `ros2 run`으로 직접 실행해야 한다. Enter 없이 키 하나로 즉시 반영된다: `g`=주행 허용, `w`/`x`=속도 +20/-20, `space`=속도 0, `a`/`d`=좌/우 조향 펄스, `f`=조향 중립, `s`=정지, `h`=도움말.
 
-별도 프로세스로 조종하고 싶으면 기존 `teleop_node`도 그대로 쓸 수 있다(어떤 미션이 떠 있든 무관하게 `/car/cmd/*`에 직접 발행 — **이걸로 모터를 움직이려면 `arduino_node`도 같이 떠 있어야 한다**, `teleop_node`는 명령을 발행만 함):
+별도 프로세스로 조종하고 싶으면 원격 조종 노드 `remote_control_node`(2026-11 `teleop_node`에서 이름 변경)도 그대로 쓸 수 있다(어떤 미션이 떠 있든 무관하게 `/car/cmd/*`에 직접 발행 — **이걸로 모터를 움직이려면 `arduino_node`도 같이 떠 있어야 한다**, `remote_control_node`는 명령을 발행만 함):
 
 ```bash
 ros2 run autodrive_skku_ros arduino_node    # 별도 터미널 — 실제 시리얼 연결 담당
-ros2 run autodrive_skku_ros teleop_node     # 조종
+ros2 run autodrive_skku_ros remote_control_node     # 조종
 ```
 
 키맵은 `test` 미션과 같고, 여기에 **`t`(PWM 캘리브레이션)** 이 추가된다 — 아래 참고.
 
-#### PWM 캘리브레이션 (teleop `t`)
+#### PWM 캘리브레이션 (원격 조종 `t`)
 
 `odometry_node`가 쓰는 `config.ODOMETRY['pwm_to_mps']`(PWM 1당 m/s)를 재는 기능이다. 이 차량엔 휠 인코더가 없어 코드가 스스로 잴 수 없고 **사람이 줄자로 한 번 재줘야** 한다 (2026-07-27).
 
 절차: 직선 구간에 세우고 앞바퀴 위치를 바닥에 표시 → `t` → PWM 입력 → `y` 확인 → 3초 카운트다운 후 **정확히 5초 주행하고 스스로 정지** → 완전히 멈춘 뒤 표시 지점부터 같은 기준점까지 재서 cm로 입력.
 
-거리는 **"출발 표시 → 완전 정지" 전체**를 잰다. `arduino_node`가 출발/정지 양쪽에 같은 Cubic 램프(`SPEED_RAMP_S`)를 걸기 때문에 램프업에서 못 간 거리를 램프다운에서 정확히 되찾아, 명령 프로파일 적분이 항상 `PWM × 5초`가 된다 — 그래서 보정계수 없이 `거리 ÷ 5초`가 그대로 정속 속도다 (`teleop_node.command_integral()` 셀프테스트가 이 전제를 검증한다).
+거리는 **"출발 표시 → 완전 정지" 전체**를 잰다. `arduino_node`가 출발/정지 양쪽에 같은 Cubic 램프(`SPEED_RAMP_S`)를 걸기 때문에 램프업에서 못 간 거리를 램프다운에서 정확히 되찾아, 명령 프로파일 적분이 항상 `PWM × 5초`가 된다 — 그래서 보정계수 없이 `거리 ÷ 5초`가 그대로 정속 속도다 (`remote_control_node.command_integral()` 셀프테스트가 이 전제를 검증한다).
 
 측정 점은 `~/autodrive_skku_logs/pwm_calib.jsonl`(`config.PWM_CALIB_LOG`)에 **누적**되므로 며칠에 나눠 재도 되고, 새 점을 넣을 때마다 그때까지 모인 점 전부로 다시 적합한다. 출력되는 `pwm_to_mps`는 **원점을 지나는** 최소제곱 기울기다 — `odometry_node.integrate_command_motion()`이 `v = speed_pwm * pwm_to_mps`로 절편 없는 곱만 하기 때문. 절편을 허용한 아핀 적합은 진단용으로 같이 나오는데, 여기서 나온 **데드존(속도가 0이 되는 PWM)이 크면** 저PWM 구간에서 원점 통과 모델이 실제보다 빠르게 예측한다는 뜻이므로, 실제 주행에 쓰는 PWM 대역(`config.DRIVE_SPEED` 근처) 위주로 점을 모으는 게 좋다.
 
@@ -173,7 +173,7 @@ ros2 run autodrive_skku_ros mission_node
 7. (POT 장착 차량만) 기동 로그에서 "조향 캘리브레이션 완료: adc_left=..., adc_right=..." 확인, `/car/steering_angle`(Foxglove)이 조향 펄스에 따라 바뀌는지 확인
 8. Foxglove에서 `/debug/lane_poi` 오버레이 확인 — 이제 원본 프레임이 아니라 BEV(원근변환)로 워프된 캔버스에 그린다(2026-07-23). 밴드 안에 차선 클러스터가 잡히고 청록색 lookahead 원이 차선을 따라가는지, 하단 텍스트의 `delta=`(조향각)가 커브에서 커지는지 확인. 안 잡히면 `ros2 param set /mission_node lane_poi.v_min_floor <값>`으로 조명에 맞게 라이브 튜닝(Otsu 적응 임계의 바닥값), 사다리꼴 자체(`lane_poi.src_frac`)가 안 맞으면 [Pure-Pursuit/BEV 캘리브레이션](#pure-pursuit-bev-캘리브레이션) 참고 ([실차 튜닝](#실차-튜닝-ros2-param))
 9. (traffic) `/debug/stop_line` 바그래프를 실제 정지선 앞에서 확인 — 정지선에서 빨간 행이 연속으로 나오고 횡단보도에서는 안 나오는지. 이어서 **빨간불에서 정지선에 맞춰 서는지** 확인: 빨간불이 확정되면 콘솔에 `빨간불 — 정지선까지 저속 접근`이 뜨고 `speed.slow`로 감속해 굴러가다 정지선에서 서야 한다. 정지선 한참 앞에서 서면 `정지선 미검출 — 접근 시간 초과` 메시지가 같이 떴을 것이므로 정지선 검출(`stop_line.*`)부터 고칠 것. 반대로 정지선을 넘어가면 `ros2 param set /mission_node stop_line.approach_max_s <값>`을 줄인다 (신호등이 보이기 시작하는 지점~정지선 거리와 `speed.slow`에 맞춰 실측 튜닝)
-10. (오도메트리 활성화하려면) `pwm_to_mps` 실측: `teleop_node`를 띄우고 **`t`** 키 → PWM 입력 → 3초 카운트다운 후 정확히 5초 주행하고 스스로 멈춘다 → 출발 표시부터 정지 위치까지 줄자로 재서 cm로 입력. PWM을 바꿔 3점 이상(예: 60 / 100 / 150) 모으면 데드존까지 나오고, 마지막에 그대로 붙여넣을 `ros2 param set /odometry_node odometry.pwm_to_mps <값>` 명령이 출력된다 ([PWM 캘리브레이션](#pwm-캘리브레이션-teleop-t) 참고). 카메라 높이/틸트도 실측해 `camera_mount.height_m`/`camera_mount.tilt_deg` 입력 → `/car/pose_confidence`가 0보다 커지는지 확인
+10. (오도메트리 활성화하려면) `pwm_to_mps` 실측: `remote_control_node`를 띄우고 **`t`** 키 → PWM 입력 → 3초 카운트다운 후 정확히 5초 주행하고 스스로 멈춘다 → 출발 표시부터 정지 위치까지 줄자로 재서 cm로 입력. PWM을 바꿔 3점 이상(예: 60 / 100 / 150) 모으면 데드존까지 나오고, 마지막에 그대로 붙여넣을 `ros2 param set /odometry_node odometry.pwm_to_mps <값>` 명령이 출력된다 ([PWM 캘리브레이션](#pwm-캘리브레이션-원격-조종-t) 참고). 카메라 높이/틸트도 실측해 `camera_mount.height_m`/`camera_mount.tilt_deg` 입력 → `/car/pose_confidence`가 0보다 커지는지 확인
 11. (t_parking) 넓은 공터에서 전체 사이클 확인 — MAP_BUILD→…→HOLD(3~5초)→EXIT(출차)→차선유지. 손은 항상 킬스위치(Ctrl+C)에. 오도메트리 미보정 상태에서도 기존과 동일하게 동작해야 정상(격자/거리 조건은 자동 비활성)
 12. 세션 종료 전 `python3 tools/dump_tuning.py` — 이날 튜닝한 값을 YAML로 뽑고, diff를 소스 dict에 반영해 커밋
 
@@ -244,7 +244,7 @@ WSL2에서 개발 중이면 Windows 쪽 Foxglove 앱은 WSL 내부 IP(`ip addr s
 | `road` 도로 주행 | ① 직진·스티어링 ② 차선 인식 주행(BEV + Pure-Pursuit, 2026-07-23) ③ 차선 변경 ④ 장애물 회피 차선 변경 | ①② 동작 / ③④ 테스트 구현 (실차 튜닝 대상). ③④는 오도메트리 보정 시 거리 기반 종료(`out_m`/`back_m`)도 가능 |
 | `traffic` 신호등 주행 | ① 정지선 인식 ② 신호등 라이트 인식(YOLO 1순위 + HSV 폴백, 연속 프레임 디바운스) | ② 동작 / ① 테스트 구현 (실차 튜닝 대상). 빨간불을 보면 그 자리에서 멈추지 않고 **정지선까지 저속 접근 후 정지**(2026-07-27) — `stop_line.approach_max_s` 안에 정지선을 못 찾으면 페일세이프로 그 자리 정지 |
 | `t_parking` T 주차 | ① 라이다 맵 빌딩(+점유 격자) ② 후방캠 주차선 인식(+라이다 슬롯 서보잉 대체) ③ 후진 차선 주행 ④ T주차 알고리즘 ⑤ 출차 후 OUT 통과 | ①~⑤ 테스트 구현 (실차 튜닝 대상). 상태머신 MAP_BUILD→FIND_SLOT→REVERSE_ALIGN→PARK→EXIT→LANE_FOLLOW\|DONE. 출차는 규정 필수(출차실패 f7 −30, OUT 도착실패 f8 −40) — `exit_mode`('lane'=출차 후 차선유지 주행/'stop'=정지), `exit_enabled=false`면 기존처럼 HOLD 후 정지 |
-| `test` 수동 테스트 | 자동주행 없음 — 미션 자체가 키보드 텔레옵 조종(`ros2 run`으로 직접 실행 필요) | 동작 |
+| `test` 수동 테스트 | 자동주행 없음 — 미션 자체가 키보드 원격 조종 조종(`ros2 run`으로 직접 실행 필요) | 동작 |
 
 "테스트 구현"은 로직이 완성돼 `tools/run_tests.py`의 스모크 테스트(FakeCar/가짜 시계로 상태머신 end-to-end)를 통과하지만, 실차에서 타이밍·임계값 튜닝은 아직 안 됐다는 뜻이다. 각 미션 파일(`autodrive_skku_ros/autodrive_skku_ros/missions/*.py`) 상단 docstring에 세부 목표·동작 방식이, 파일 상단 상수에 그 미션의 튜닝값이 정리돼 있다. `Mission.step(sensors, car)` 인터페이스가 고정돼 있어 튜닝은 상수 수정(또는 주행 중 `ros2 param set` — [실차 튜닝](#실차-튜닝-ros2-param))만으로 끝난다.
 
@@ -268,7 +268,7 @@ autodrive_skku/                        (git repo root — 컨테이너, 그 자�
 │   │   │   ├── mission_node.py         #   센서 구독 → sensors dict 구성 → Mission.step() 오케스트레이터
 │   │   │   │                           #   + /debug/* 오버레이 발행 (5Hz, debug.overlay 파라미터로 on/off)
 │   │   │   ├── ports.py                #   시리얼 포트 자동 감지 (ROS 비의존)
-│   │   │   └── teleop_node.py          #   /car/cmd/*에 직접 발행하는 독립 키보드 조종
+│   │   │   └── remote_control_node.py          #   /car/cmd/*에 직접 발행하는 독립 키보드 조종
 │   │   ├── missions/                   # 미션 로직 (road / traffic / t_parking / test, lane_follow 공유)
 │   │   │                               #   각 파일 상단에 그 미션의 튜닝값 (OBSTACLE_CAM/LANE_CHANGE=
 │   │   │                               #   road.py, LANE_EDGE/LANE_POI=lane_follow.py, STOP_LINE/
@@ -392,7 +392,7 @@ pip3 uninstall -y torch torchvision && (위 CPU 설치 재실행)
 
 시각 오도메트리(VO — 전방 카메라 하단 프레임의 지면 특징점 추적)와 커맨드-적분(속도 PWM·조향각의 자전거 모델 적분)을 융합해 **미션 시작 이후의 상대 pose**를 추정한다 — `/car/pose`(PoseStamped)와 `/car/pose_confidence`(0~1)로 발행. IEEE 5520874의 VO+데드레커닝 융합에서 착안했지만 이 차량에는 휠 인코더가 없어 "데드레커닝" 항이 커맨드 적분일 뿐이라 슬립/정지/배터리 처짐은 감지하지 못한다.
 
-`config.CAMERA_MOUNT`(카메라 높이/틸트)와 `config.ODOMETRY['pwm_to_mps']`가 실측 전(`None`)인 동안은 confidence=0으로 사실상 비활성 동작(fail-inert)이라 평소엔 켜둬도 무해하다 — 실측값을 채우면 그때부터 실제 추정이 시작된다. 실측값은 소스 수정 없이 실차에서 바로 넣을 수 있다: `ros2 param set /odometry_node camera_mount.height_m 0.52` 식으로 ([실차 튜닝](#실차-튜닝-ros2-param), `0.0`=미측정 규약). `pwm_to_mps`는 `teleop_node`의 `t` 키가 재준다 ([PWM 캘리브레이션](#pwm-캘리브레이션-teleop-t)). 끄려면 `run_odometry:=false`. 상대 오도메트리라 누적 오차는 시간이 지나면 무한정 커진다는 점 주의. 셀프테스트: `python3 -m autodrive_skku_ros.nodes.odometry_node --selftest`.
+`config.CAMERA_MOUNT`(카메라 높이/틸트)와 `config.ODOMETRY['pwm_to_mps']`가 실측 전(`None`)인 동안은 confidence=0으로 사실상 비활성 동작(fail-inert)이라 평소엔 켜둬도 무해하다 — 실측값을 채우면 그때부터 실제 추정이 시작된다. 실측값은 소스 수정 없이 실차에서 바로 넣을 수 있다: `ros2 param set /odometry_node camera_mount.height_m 0.52` 식으로 ([실차 튜닝](#실차-튜닝-ros2-param), `0.0`=미측정 규약). `pwm_to_mps`는 `remote_control_node`의 `t` 키가 재준다 ([PWM 캘리브레이션](#pwm-캘리브레이션-원격-조종-t)). 끄려면 `run_odometry:=false`. 상대 오도메트리라 누적 오차는 시간이 지나면 무한정 커진다는 점 주의. 셀프테스트: `python3 -m autodrive_skku_ros.nodes.odometry_node --selftest`.
 
 오도메트리가 보정되면(conf>0) 미션들이 자동으로 활용한다: `mission_node`가 `/car/pose`를 `sensors["pose"]`/`sensors["pose_conf"]`로 넣어주고, road 차선 변경은 거리 기반 종료(`lane_change.out_m`/`back_m`), t_parking은 점유 격자 맵빌딩(`/debug/occupancy`)과 출차 거리 미러링에 쓴다. 미보정(conf=0)이면 전부 자동 비활성 — 기존 타이밍 동작과 완전히 같다.
 
@@ -455,7 +455,7 @@ python3 tools/hw_test.py --forward             # 전진 모듈만
 python3 tools/hw_test.py --no-steer            # 조향만 빼고
 python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 ```
-바퀴를 지면에서 띄운 상태에서 실행할 것 — 실제로 모터가 움직인다(`car.go()`를 먼저 호출하므로 go-게이트 문제는 없음). 안 움직이면 배선/펌웨어 문제, 움직이는데 `teleop_node`/`test` 미션으로는 안 움직이면 ROS 쪽(포트 자동감지, 토픽 연결)을 의심.
+바퀴를 지면에서 띄운 상태에서 실행할 것 — 실제로 모터가 움직인다(`car.go()`를 먼저 호출하므로 go-게이트 문제는 없음). 안 움직이면 배선/펌웨어 문제, 움직이는데 `remote_control_node`/`test` 미션으로는 안 움직이면 ROS 쪽(포트 자동감지, 토픽 연결)을 의심.
 
 **2단계 — `pin_test.ino`**: 그래도 안 움직이면 시리얼 프로토콜/워치독 로직 자체를 배제하고 순수 GPIO만 확인. `digitalWrite`/`analogWrite`만으로 LEFT → RIGHT → STEER 순서로 각 채널을 1초씩 직접 돌린다(시리얼 명령 대기 없음):
 ```bash
@@ -474,7 +474,7 @@ python3 tools/hw_test.py --port /dev/ttyACM0 --speed 80 --duration 2
 | 전/후방 카메라가 서로 바뀜 | 같은 모델(C920) 두 대면 자동 감지가 어느 쪽이 전방인지 알 수 없어 **찾은 순서대로** 배정한다 — `python3 tools/pick_camera.py`로 한 번 지정할 것. 되돌리려면 `config/cameras.json` 삭제 |
 | 뭐가 문제인지 모르겠음 / 주행이 그냥 안 됨 | `python3 tools/doctor.py` — 정적 환경 → 디스크 → ROS 노드 → 토픽 생존 → 아두이노 → 카메라 → 라이다 → 미션 순서로 어디서 끊겼는지 짚어준다. 읽기 전용이라 모터는 움직이지 않는다(구동 확인은 `hw_test.py`) |
 | 아두이노/라이다 포트 뒤바뀜 | `arduino_port:=`/`lidar_port:=` launch 인자로 직접 지정 |
-| 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `teleop_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `teleop_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |
+| 차가 안 움직임 | 미션이 `car.go()`를 호출했는지, 펌웨어 업로드 여부 확인. `remote_control_node`/`test` 미션으로 수동 테스트 중이면 **`w`/`x`로 속도를 주기 전에 반드시 `g`부터 눌러야 한다** — 펌웨어 워치독 게이트(`canGo`)가 열려 있지 않으면 속도값은 받아도 실제 구동은 0으로 처리됨. `s`를 누르면 게이트가 다시 닫히므로 그 다음엔 다시 `g`부터. `remote_control_node`만 띄우고 `arduino_node`를 안 띄웠어도 이 증상이 남 |
 | 조향이 계속 한쪽으로 감 | 펄스 방식이라 자동 복원 안 됨 — 반대 방향 펄스로 복귀 필요. 중앙 정렬은 하드웨어 텐션 스프링이 담당 |
 | `ros2 launch`에서 미션 메뉴가 안 뜸/입력이 안 먹힘 | `mission:=road`처럼 launch 인자로 미리 지정할 것 — 대화형 메뉴는 `ros2 run autodrive_skku_ros mission_node`로 직접 실행할 때만 stdin이 정상 동작한다 |
 | `colcon build`에서 새 실행파일 이름이 안 보임 | [8단계](#8단계-코드-업데이트-반영-2회차-이후) 참고 — 증분 빌드가 entry_points 변경을 못 잡는 흔한 문제 |
