@@ -49,6 +49,12 @@ DRIVE_LOG_DIR = os.path.expanduser("~/autodrive_skku_logs")
 REMOTE_CONTROL_RECORD_DIR = os.path.expanduser("~/autodrive_skku_logs/remote_control_recordings")
 REMOTE_CONTROL_RECORD_FPS = 20.0
 
+# 원격 조종 't' 키(PWM 캘리브레이션)가 (PWM, 실측거리) 점을 쌓아두는 파일. 세션마다
+# 새 파일을 만드는 다른 로그들과 달리 **고정 경로에 append**한다 — 며칠에 걸쳐
+# 몇 점씩 나눠 재도 그때까지 모인 점을 전부 써서 pwm_to_mps를 적합하기 위해서다
+# (2026-07-27). 줄 스키마는 remote_control_node.load_calib_samples() 참고.
+PWM_CALIB_LOG = os.path.expanduser("~/autodrive_skku_logs/pwm_calib.jsonl")
+
 DRIVE_SPEED = 100        # 기본 주행 속도 (-255..255, 실차 검증값)
 SLOW_SPEED = 60          # 주차 등 저속 기동 속도
 
@@ -121,6 +127,8 @@ CAMERA_MOUNT = dict(height_m=None, tilt_deg=None)
 # 쓰지 않고 펄스 카운트 적분으로 폴백한다. 링크→기어 교체 후 스윙이 넓어지면
 # 자동으로 POT 쪽을 쓰게 된다(코드 변경 불필요).
 ODOMETRY = dict(
+    # 📏 remote_control_node의 't' 키(PWM 캘리브레이션)로 측정한다 — 지정 PWM으로 5초
+    # 주행 후 실측 거리를 넣으면 원점 통과 적합값과 ros2 param set 명령을 뽑아준다.
     pwm_to_mps=None,
     deg_per_pulse=None,   # POT 폴백(펄스 카운트 적분)용. 미측정 시 조향각 0(직진)으로 취급
     min_pot_span_counts=8,

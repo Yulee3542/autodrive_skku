@@ -22,15 +22,22 @@ steering_angle_deg는 arduino_node가 고정 캘리브레이션(steering_adc_lef
 받았을 때만 발행되므로 없으면 null이다 — 그 경우에도 원시 ADC(steering_pot)는
 남으므로 캘리브레이션이 끝난 뒤 후처리로 각도를 붙일 수 있다.
 
+'t' 키는 별도 기능이다 — odometry_node가 쓰는 config.ODOMETRY["pwm_to_mps"]를
+실측하기 위해, 지정한 PWM으로 정확히 CALIB_DURATION_S초 주행하고 완전히 멈춘 뒤
+사람이 줄자로 잰 거리를 받아 선형 적합까지 해준다 (2026-07-27). 이 차량에는 휠
+인코더가 없어 코드가 스스로 잴 수 없는 값이라 사람 손이 반드시 한 번 필요하다.
+
 camera_node.py와 같은 관례로 ROS/유닉스 전용 임포트는 전부 함수 안에서 한다 —
 그래야 ROS 없는 개발 PC(윈도우 포함)에서도 셀프테스트가 돈다.
 
 오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.remote_control_node --selftest
 """
 import datetime
+import json
 import os
 import sys
 import threading
+import time
 
 try:
     import cv2
@@ -44,6 +51,21 @@ from .. import config, drive_logger
 SPEED_STEP = 20
 SPEED_LIMIT = 255
 
+# ---- 't' PWM 캘리브레이션 ----
+# 측정 구간은 "정지 상태 → 완전 정지"다. arduino_node가 출발/정지 양쪽에 같은
+# Cubic 램프(SPEED_RAMP_S)를 걸기 때문에 램프업에서 못 간 거리를 램프다운에서
+# 정확히 되찾아, 명령 프로파일의 적분이 hold_s >= ramp_s인 한 항상 PWM*hold_s가
+# 된다 (command_integral() 셀프테스트로 검증). 그래서 보정계수 없이
+# v = 총이동거리 / CALIB_DURATION_S 를 평균속도로 쓸 수 있다.
+CALIB_DURATION_S = 5.0
+# stop 발행 후 차가 실제로 멈출 때까지의 대기. arduino_node의 램프 0.5초에
+# keepalive 주기(200ms) 지연과 여유를 더한 값 — 이만큼 기다린 뒤에야 "재세요"라고
+# 알려야 측정 구간이 위 적분과 일치한다. 원격 조종 노드가 arduino_node를 임포트하지
+# 않도록(순환/시리얼 의존 회피) 여기 상수로 둔다.
+CALIB_SETTLE_S = 0.8
+CALIB_KIND = "pwm_calib"       # 누적 로그에서 이 기능의 줄만 골라내는 태그
+CALIB_DEADZONE_WARN_PWM = 20   # 데드존이 이보다 크면 원점 통과 모델을 경고
+
 HELP = """
 원격 조종 모드 (모터/조향 동작 확인용) — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
   ※ w/x로 속도를 줘도 먼저 g(주행 허용)를 안 보내면 차가 안 움직입니다
@@ -56,6 +78,7 @@ HELP = """
   d : 우 조향 펄스 (R)
   f : 조향 중립 (F)
   s : stop (즉시 정지, 게이트도 닫힘)
+  t : PWM 캘리브레이션 — 지정 PWM으로 5초 주행 후 실측거리를 넣어 pwm_to_mps 산출
   h : 이 도움말 다시 보기
   q : 종료 (Ctrl+C도 동작)
 
@@ -179,6 +202,200 @@ class _CameraRecorder:
                   f"{config.REMOTE_CONTROL_RECORD_FPS:.1f}fps)")
 
 
+CALIB_HELP = f"""
+--- PWM 캘리브레이션 ({CALIB_DURATION_S:.0f}초 정속 주행) ---
+odometry_node의 pwm_to_mps(= PWM 1당 m/s)를 실측합니다. 이 차량엔 휠 인코더가
+없어서 거리는 사람이 줄자로 재야 합니다.
+
+  1) 직선 구간에 차를 세우고 앞바퀴 위치를 바닥에 표시(테이프 등)
+  2) 아래에서 PWM 값을 입력 -> 3초 카운트다운 후 정확히 {CALIB_DURATION_S:.0f}초 주행
+  3) 차가 완전히 멈추면 표시한 지점부터 같은 기준점까지의 거리를 cm로 입력
+  4) PWM을 바꿔 3점 이상(예: 60 / 100 / 150) 모으면 데드존까지 나옵니다
+
+거리는 "출발 표시 -> 완전 정지" 전체를 재세요. 출발/정지 램프가 서로 정확히
+상쇄되므로 그 전체 거리를 {CALIB_DURATION_S:.0f}초로 나눈 값이 정속 속도가 됩니다.
+샘플은 세션이 바뀌어도 누적되니 며칠에 나눠 재도 됩니다.
+"""
+
+
+def load_calib_samples(path):
+    """누적 캘리브 로그에서 이 기능이 남긴 줄만 읽어온다.
+
+    파일이 없으면 [] — 첫 측정 세션도 그냥 빈 리스트로 시작하면 된다. 깨진 줄
+    (중간에 죽어 잘린 마지막 줄 등)과 다른 스키마의 줄은 조용히 건너뛴다.
+    """
+    samples = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return samples
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("kind") == CALIB_KIND:
+            samples.append(rec)
+    return samples
+
+
+def calib_speed_mps(sample):
+    """샘플 한 개의 부호 있는 평균 속도(m/s). 값이 없거나 시간이 0 이하면 None."""
+    dur = sample.get("duration_s")
+    dist = sample.get("distance_m")
+    if dist is None or not dur or dur <= 0:
+        return None
+    return dist / dur
+
+
+def fit_pwm_to_mps(samples):
+    """(PWM, 실측거리) 샘플들로 PWM->속도 선형 모델을 적합한다. 순수 함수.
+
+    pwm_to_mps는 **원점을 지나는** 최소제곱 기울기 sum(p*v)/sum(p*p)다 —
+    odometry_node.integrate_command_motion()이 v = speed_pwm * pwm_to_mps로 절편
+    없는 스칼라 곱만 하므로, 파라미터에 넣을 값은 반드시 이 형태여야 한다.
+    절편을 허용한 아핀 적합(slope/intercept/deadzone_pwm)은 진단용으로만 같이
+    돌린다 — 데드존이 크면 저PWM 구간에서 원점 통과 모델이 실제보다 빠르게
+    예측한다는 뜻이라 경고 근거가 된다.
+
+    적합 불가(샘플 0개, 전부 PWM=0/무효)면 None.
+    """
+    pts = []
+    for s in samples:
+        v = calib_speed_mps(s)
+        p = s.get("pwm")
+        if v is None or not p:
+            continue
+        pts.append((float(p), v))
+    if not pts:
+        return None
+
+    sum_pp = sum(p * p for p, _ in pts)
+    if sum_pp <= 0:
+        return None
+    k = sum(p * v for p, v in pts) / sum_pp
+    out = {
+        "n": len(pts),
+        "pwm_to_mps": k,
+        "max_resid_mps": max(abs(v - k * p) for p, v in pts),
+        "slope": None,
+        "intercept": None,
+        "deadzone_pwm": None,
+        "r2": None,
+    }
+
+    n = len(pts)
+    mean_p = sum(p for p, _ in pts) / n
+    mean_v = sum(v for _, v in pts) / n
+    var_p = sum((p - mean_p) ** 2 for p, _ in pts)
+    if n < 2 or var_p <= 0:
+        # 점이 하나뿐이거나 전부 같은 PWM — 기울기와 절편을 분리할 수 없다.
+        return out
+    slope = sum((p - mean_p) * (v - mean_v) for p, v in pts) / var_p
+    intercept = mean_v - slope * mean_p
+    out["slope"] = slope
+    out["intercept"] = intercept
+    if slope:
+        out["deadzone_pwm"] = -intercept / slope
+    ss_tot = sum((v - mean_v) ** 2 for _, v in pts)
+    if ss_tot > 0:
+        ss_res = sum((v - (slope * p + intercept)) ** 2 for p, v in pts)
+        out["r2"] = 1.0 - ss_res / ss_tot
+    return out
+
+
+def format_calib_report(fit):
+    """적합 결과를 사람이 읽는 여러 줄 문자열로. 순수 함수(셀프테스트 가능)."""
+    if fit is None:
+        return "[remote_control] 아직 적합할 샘플이 없습니다 (거리를 입력한 주행이 1회 이상 필요)."
+    lines = [
+        f"[remote_control] 샘플 {fit['n']}점 적합 결과",
+        f"  pwm_to_mps = {fit['pwm_to_mps']:.6f}"
+        f"  (원점 통과, 최대잔차 {fit['max_resid_mps']:.3f} m/s)",
+    ]
+    if fit["slope"] is None:
+        lines.append("  점이 1개이거나 전부 같은 PWM — 데드존 분리 불가."
+                     " PWM을 바꿔 한 점 더 재세요.")
+    else:
+        r2 = "" if fit["r2"] is None else f", R2={fit['r2']:.3f}"
+        lines.append(f"  진단용 아핀: v = {fit['slope']:.6f}*PWM"
+                     f" + {fit['intercept']:.4f}{r2}")
+        dz = fit["deadzone_pwm"]
+        if dz is not None:
+            lines.append(f"  데드존(속도가 0이 되는 PWM) = {dz:.1f}")
+            if abs(dz) >= CALIB_DEADZONE_WARN_PWM:
+                lines.append(
+                    f"  * 데드존이 큽니다 — |PWM| {abs(dz):.0f} 부근 저속에서는 원점 통과"
+                    " 모델이 실제보다 빠르게 예측합니다. 실제 주행에 쓰는 PWM 대역"
+                    " (config.DRIVE_SPEED 근처) 위주로 점을 모으세요.")
+    lines.append("  ros2 param set /odometry_node odometry.pwm_to_mps "
+                 f"{fit['pwm_to_mps']:.6f}")
+    return "\n".join(lines)
+
+
+def parse_calib_pwm(text, default):
+    """PWM 입력 파싱. 빈칸이면 default. 반환 (pwm, 오류메시지) — 한쪽만 not None."""
+    if text == "":
+        pwm = default
+    else:
+        try:
+            pwm = int(float(text))
+        except ValueError:
+            return None, "숫자를 입력하세요."
+    if pwm == 0:
+        return None, "PWM 0으로는 움직이지 않습니다 — 0이 아닌 값을 주세요."
+    if abs(pwm) > SPEED_LIMIT:
+        return None, f"PWM은 -{SPEED_LIMIT}..{SPEED_LIMIT} 범위여야 합니다."
+    return pwm, None
+
+
+def parse_calib_distance(text, pwm):
+    """실측 거리 입력(cm) 파싱. 빈칸이면 (None, None) = 기록 건너뛰기.
+
+    저장은 부호 있는 미터다 — 후진 주행(음수 PWM)은 음수 거리로 남겨야 전진/후진
+    점이 원점 통과 직선 하나에 같이 올라간다. 사용자는 항상 이동한 길이를
+    양수로 입력하고 부호는 여기서 붙인다.
+    """
+    if text == "":
+        return None, None
+    try:
+        cm = float(text)
+    except ValueError:
+        return None, "숫자를 입력하세요 (cm)."
+    if cm <= 0:
+        return None, "이동 거리는 0보다 커야 합니다."
+    return (cm / 100.0) * (1 if pwm > 0 else -1), None
+
+
+def command_integral(pwm, hold_s, ramp_s, dt=0.001):
+    """arduino_node가 실제로 내보내는 속도 명령 프로파일(램프업->정속->램프다운)의
+    수치적분(PWM*초). 중점법.
+
+    이 기능이 "총 이동거리 / hold_s"를 그대로 평균속도로 쓰는 근거를 셀프테스트에서
+    검증하기 위한 것 — 램프가 양끝 대칭이라 hold_s >= ramp_s면 결과는 항상
+    pwm*hold_s가 된다. 실제 램프 함수(arduino_node.cubic_trajectory)를 그대로
+    가져다 쓰므로, 나중에 램프 방식이 바뀌면 셀프테스트가 먼저 깨진다.
+    """
+    from .arduino_node import cubic_trajectory
+
+    total = 0.0
+    steps = int(round((hold_s + ramp_s) / dt))
+    for i in range(steps):
+        t = (i + 0.5) * dt
+        if t < ramp_s:
+            v = cubic_trajectory(t, ramp_s, 0.0, pwm)
+        elif t < hold_s:
+            v = pwm
+        else:
+            v = cubic_trajectory(t - hold_s, ramp_s, pwm, 0.0)
+        total += v * dt
+    return total
+
+
 def read_key():
     """터미널을 raw 모드로 바꿔 Enter 없이 키 하나를 읽고 원래대로 복원한다."""
     import termios  # 유닉스 전용 — 모듈 임포트 시점에 끌어오면 윈도우에서 셀프테스트 불가
@@ -191,6 +408,19 @@ def read_key():
         return sys.stdin.read(1)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def prompt_line(text):
+    """한 줄 입력(Enter 필요). 취소/입력종료(Ctrl+C, Ctrl+D)면 None.
+
+    read_key()는 읽는 그 순간에만 터미널을 raw로 바꿨다가 되돌리므로, 키 루프
+    사이에서 이렇게 평범한 줄 입력을 받아도 된다.
+    """
+    try:
+        return input(text).strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return None
 
 
 def make_session_paths(record_dir, stamp=None):
@@ -246,6 +476,14 @@ def main(args=None):
             self.create_subscription(Int32, "/car/steering_pot", self._on_pot, 10)
             self.create_subscription(Float32, "/car/steering_angle", self._on_angle, 10)
 
+            # 't' PWM 캘리브레이션 누적 샘플. 고정 경로라 지난 세션 점들이 그대로
+            # 살아있고, 새 점을 넣을 때마다 전부 합쳐 다시 적합한다.
+            self._calib_path = config.PWM_CALIB_LOG
+            self._calib_samples = load_calib_samples(self._calib_path)
+            if self._calib_samples:
+                print(f"[remote_control] 기존 PWM 캘리브 샘플 {len(self._calib_samples)}점 로드"
+                      f" ({self._calib_path})")
+
             self._recorders = []
             if cv2 is None:
                 print("[remote_control] opencv 미설치 — 카메라 녹화 생략(수동 조작은 그대로 동작)")
@@ -281,6 +519,99 @@ def main(args=None):
             self._drive_pub.publish(Int16(data=self._speed))
             note = "" if self._went_go else " (아직 g 안 보냄 — 실제로는 안 움직입니다)"
             print(f"speed={self._speed}{note}")
+
+        def _run_calibration(self):
+            """지정 PWM으로 정확히 CALIB_DURATION_S초 주행하고 완전히 멈춘 뒤,
+            사람이 잰 거리를 받아 pwm_to_mps를 적합한다.
+
+            측정 구간이 "정지 -> 완전 정지"인 이유는 CALIB_DURATION_S 주석 참고
+            (양끝 램프가 상쇄되어 보정계수가 필요 없다). 주행 중 카메라 녹화는
+            평소처럼 계속 돌아가고, _labels()가 이 구간의 PWM을 그대로 라벨에
+            남긴다.
+            """
+            print(CALIB_HELP)
+            default_pwm = self._speed or config.DRIVE_SPEED
+            while True:
+                text = prompt_line(f"PWM 값 (c=취소) [{default_pwm}]: ")
+                if text is None or text.lower() == "c":
+                    print("[remote_control] 캘리브레이션 취소")
+                    return
+                pwm, err = parse_calib_pwm(text, default_pwm)
+                if err is None:
+                    break
+                print(f"  {err}")
+
+            # tools/hw_test.py와 같은 확인 관문 — 실제로 모터가 도는 기능이다.
+            confirm = prompt_line(
+                f"PWM {pwm}으로 {CALIB_DURATION_S:.0f}초 주행합니다."
+                " 직선 경로가 비어 있고 출발 위치를 표시했나요? (y/N): ")
+            if confirm is None or confirm.lower() != "y":
+                print("[remote_control] 캘리브레이션 취소")
+                return
+            for i in (3, 2, 1):
+                print(f"  {i}...")
+                time.sleep(1.0)
+
+            aborted = False
+            t0 = time.monotonic()
+            try:
+                # go가 drive보다 먼저여야 한다 — 펌웨어 canGo 게이트가 닫혀 있으면
+                # 속도값을 받아도 구동은 0으로 처리된다.
+                self._go_pub.publish(Empty())
+                self._went_go = True
+                self._speed = pwm
+                t0 = time.monotonic()
+                self._drive_pub.publish(Int16(data=pwm))
+                print(f"[remote_control] 주행 시작 (PWM {pwm})")
+                time.sleep(CALIB_DURATION_S)
+            except KeyboardInterrupt:
+                # raw 모드가 아닌 구간이라 Ctrl+C가 실제 예외로 들어온다. 여기서
+                # 삼켜 키 루프로 되돌아간다 — 정지는 아래 finally가 이미 보낸다.
+                aborted = True
+            finally:
+                held_s = time.monotonic() - t0
+                self._stop_pub.publish(Empty())
+                self._speed = 0
+                self._went_go = False
+                self._last_steer = "F"
+                print(f"[remote_control] 정지 명령 발행 — 정지 대기 {CALIB_SETTLE_S:.1f}초")
+                time.sleep(CALIB_SETTLE_S)
+
+            if aborted:
+                print(f"[remote_control] 중단됨 ({held_s:.2f}초 주행) — 기록하지 않습니다")
+                return
+
+            print(f"[remote_control] 주행 완료 (실제 홀드 {held_s:.2f}초)."
+                  " 출발 표시부터 지금 위치까지 같은 기준점으로 재세요.")
+            while True:
+                text = prompt_line("실측 이동거리 cm (빈칸=기록 안 함): ")
+                dist_m, err = parse_calib_distance("" if text is None else text, pwm)
+                if err is None:
+                    break
+                print(f"  {err}")
+            if dist_m is None:
+                print("[remote_control] 거리 미입력 — 이번 주행은 기록하지 않습니다")
+                return
+
+            record = {
+                "t": time.time(),
+                "kind": CALIB_KIND,
+                "pwm": pwm,
+                "distance_m": dist_m,
+                "duration_s": held_s,
+                "speed_mps": dist_m / held_s,
+            }
+            try:
+                os.makedirs(os.path.dirname(self._calib_path), exist_ok=True)
+                logger = drive_logger.DriveLogger(self._calib_path)
+                logger.log_raw(record)
+                logger.close()
+                print(f"[remote_control] 기록 -> {self._calib_path}")
+            except OSError as e:
+                print(f"[remote_control] 캘리브 로그 기록 실패({e})"
+                      " — 이번 점은 이 세션에서만 유효합니다")
+            self._calib_samples.append(record)
+            print(format_calib_report(fit_pwm_to_mps(self._calib_samples)))
 
         def run(self):
             print(HELP)
@@ -320,6 +651,8 @@ def main(args=None):
                         self._last_steer = "F"
                         self._stop_pub.publish(Empty())
                         print("stop")
+                    elif key == "t":
+                        self._run_calibration()
                     elif key == "h":
                         print(HELP)
             finally:
@@ -394,7 +727,6 @@ def selftest():
     if cv2 is None:
         print("[X ] opencv 미설치 — remote_control 셀프테스트 불가")
         return 1
-    import json
     import shutil
     import tempfile
 
@@ -498,6 +830,104 @@ def selftest():
         empty.close()
         check("프레임 0장이면 mp4/jsonl을 만들지 않고 경고만 (camera_node 미기동)",
               not os.path.exists(empty_mp4) and not os.path.exists(empty_log))
+
+        # ================= 't' PWM 캘리브레이션 =================
+
+        # ---- 이 기능의 전제: 양끝 램프가 상쇄되어 유효 주행시간 = 홀드 시간 ----
+        # 실제 램프 함수(arduino_node.cubic_trajectory)를 그대로 적분하므로,
+        # 램프 방식이 바뀌면 여기서 먼저 깨진다.
+        from .arduino_node import SPEED_RAMP_S
+        area = command_integral(100, CALIB_DURATION_S, SPEED_RAMP_S)
+        check("램프업/램프다운이 정확히 상쇄 — 명령 적분 = PWM*홀드시간",
+              abs(area - 100 * CALIB_DURATION_S) < 0.01)
+        check("램프 시간이 달라져도 상쇄는 유지 (홀드 >= 램프인 한)",
+              abs(command_integral(80, 5.0, 1.5) - 80 * 5.0) < 0.01
+              and abs(command_integral(80, 5.0, 0.0) - 80 * 5.0) < 0.01)
+
+        # ---- fit_pwm_to_mps ----
+        def sample(pwm, dist_m, dur=CALIB_DURATION_S):
+            return {"kind": CALIB_KIND, "pwm": pwm,
+                    "distance_m": dist_m, "duration_s": dur}
+
+        check("샘플 0개면 적합 결과 None", fit_pwm_to_mps([]) is None)
+        check("PWM=0 샘플만 있으면 적합 불가(None)",
+              fit_pwm_to_mps([sample(0, 0.0)]) is None)
+
+        # v = 0.01*PWM 인 완벽한 원점 통과 데이터 (5초 * 0.01 * PWM 미터)
+        exact = [sample(p, 0.01 * p * CALIB_DURATION_S) for p in (60, 100, 150)]
+        fit = fit_pwm_to_mps(exact)
+        check("원점 통과 데이터에서 pwm_to_mps를 정확히 복원",
+              abs(fit["pwm_to_mps"] - 0.01) < 1e-9 and fit["n"] == 3)
+        check("잔차가 0이고 데드존도 0으로 나옴",
+              fit["max_resid_mps"] < 1e-9 and abs(fit["deadzone_pwm"]) < 1e-6
+              and abs(fit["r2"] - 1.0) < 1e-9)
+
+        one = fit_pwm_to_mps([sample(100, 5.0)])
+        check("점이 1개면 원점 통과 값만 나오고 데드존은 None",
+              abs(one["pwm_to_mps"] - 0.01) < 1e-9 and one["slope"] is None
+              and one["deadzone_pwm"] is None)
+        check("같은 PWM만 여러 점이어도 데드존 분리 불가(None)",
+              fit_pwm_to_mps([sample(100, 5.0), sample(100, 5.2)])["slope"] is None)
+
+        # 데드존이 있는 데이터: v = 0.01*(PWM - 30) -> 데드존 30
+        dz = [sample(p, 0.01 * (p - 30) * CALIB_DURATION_S) for p in (60, 100, 150)]
+        fit_dz = fit_pwm_to_mps(dz)
+        check("절편 있는 데이터에서 데드존 PWM을 복원",
+              abs(fit_dz["deadzone_pwm"] - 30.0) < 1e-6)
+        check("데드존이 있으면 원점 통과 기울기는 실제 기울기보다 작다",
+              fit_dz["pwm_to_mps"] < fit_dz["slope"])
+
+        # 후진(음수 PWM) 샘플은 음수 거리로 저장되어 같은 직선에 올라간다
+        both = [sample(100, 5.0), sample(-100, -5.0)]
+        check("전진/후진 샘플이 부호까지 맞게 같은 기울기로 적합",
+              abs(fit_pwm_to_mps(both)["pwm_to_mps"] - 0.01) < 1e-9)
+
+        # 시간이 0/음수인 깨진 샘플은 무시
+        check("duration_s가 0 이하인 샘플은 무시",
+              calib_speed_mps(sample(100, 5.0, 0)) is None
+              and fit_pwm_to_mps([sample(100, 5.0, 0)] + exact)["n"] == 3)
+
+        # ---- 입력 파싱 ----
+        check("PWM 입력: 빈칸이면 기본값, 숫자면 그 값",
+              parse_calib_pwm("", 100) == (100, None)
+              and parse_calib_pwm("150", 100) == (150, None)
+              and parse_calib_pwm("-80", 100) == (-80, None))
+        check("PWM 입력: 0/범위초과/비숫자는 거부",
+              parse_calib_pwm("0", 100)[0] is None
+              and parse_calib_pwm("300", 100)[0] is None
+              and parse_calib_pwm("abc", 100)[0] is None)
+        check("거리 입력: cm -> m 변환, 부호는 PWM을 따라감",
+              parse_calib_distance("250", 100) == (2.5, None)
+              and parse_calib_distance("250", -100) == (-2.5, None))
+        check("거리 입력: 빈칸은 기록 건너뛰기, 0/음수/비숫자는 거부",
+              parse_calib_distance("", 100) == (None, None)
+              and parse_calib_distance("0", 100)[1] is not None
+              and parse_calib_distance("x", 100)[1] is not None)
+
+        # ---- 누적 로그 로드 ----
+        calib_path = os.path.join(tmp_dir, "pwm_calib.jsonl")
+        check("로그 파일이 없으면 빈 리스트", load_calib_samples(calib_path) == [])
+        logger = drive_logger.DriveLogger(calib_path)
+        for s in exact:
+            logger.log_raw(dict(s, t=1753280000.0))
+        # 다른 스키마의 줄(원격 조종 프레임 라벨 등)이 섞여도 골라내야 한다
+        logger.log_raw({"frame": 0, "t": 1.0, "cam": "front"})
+        logger.close()
+        with open(calib_path, "a", encoding="utf-8") as f:
+            f.write('{"kind": "pwm_calib", "pwm": 1')  # 중간에 죽어 잘린 줄
+        loaded = load_calib_samples(calib_path)
+        check("누적 로그에서 캘리브 줄만 골라 읽음(다른 스키마/깨진 줄 무시)",
+              len(loaded) == 3 and all(r["kind"] == CALIB_KIND for r in loaded))
+        check("로드한 샘플로 다시 적합해도 같은 결과(세션 간 누적)",
+              abs(fit_pwm_to_mps(loaded)["pwm_to_mps"] - 0.01) < 1e-9)
+
+        # ---- 리포트 문자열 ----
+        report = format_calib_report(fit_dz)
+        check("리포트에 ros2 param set 명령과 데드존 경고가 포함됨",
+              "ros2 param set /odometry_node odometry.pwm_to_mps" in report
+              and "데드존" in report and "데드존이 큽니다" in report)
+        check("샘플이 없으면 리포트가 안내 문구를 반환",
+              "샘플이 없습니다" in format_calib_report(None))
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
