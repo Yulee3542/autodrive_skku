@@ -31,7 +31,7 @@ setup(
             "lidar_node = autodrive_skku_ros.nodes.lidar_node:ros_main",
             "odometry_node = autodrive_skku_ros.nodes.odometry_node:ros_main",
             "mission_node = autodrive_skku_ros.nodes.mission_node:main",
-            "teleop_node = autodrive_skku_ros.nodes.teleop_node:main",
+            "remote_control_node = autodrive_skku_ros.nodes.remote_control_node:main",
         ],
     },
 )

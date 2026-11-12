@@ -41,15 +41,20 @@ class DriveLogger:
         self.path = path
         self._f = open(path, "a", buffering=1, encoding="utf-8")
 
+    def log_raw(self, record):
+        """임의의 dict 한 개를 그대로 JSON 한 줄로 남긴다. mission_node의 틱 로그와
+        스키마가 다른 기록(원격 조종 데이터셋의 프레임 단위 라벨 등)이 같은 파일
+        포맷·같은 라인 버퍼링을 그대로 쓰도록 하기 위한 하위 레벨 진입점."""
+        self._f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def log(self, tuning_snapshot, commands, mission=None, state=None, t=None):
-        record = {
+        self.log_raw({
             "t": time.time() if t is None else t,
             "mission": mission,
             "state": state,
             "tuning": tuning_snapshot,
             "commands": commands,
-        }
-        self._f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        })
 
     def close(self):
         self._f.close()
@@ -115,6 +120,21 @@ def selftest():
         check("commands 필드가 그대로 보존됨(조향/속도/게이트)",
               lines[0]["commands"] == {"steer": "F", "drive": 80, "go": True}
               and lines[1]["commands"]["steer"] == "L")
+
+        # ---- log_raw: 틱 로그와 다른 스키마도 같은 파일 포맷으로 남는지 ----
+        raw_path = make_log_path(log_dir, mission="remote_control_front")
+        raw_logger = DriveLogger(raw_path)
+        raw_logger.log_raw({"frame": 0, "t": 5.0, "cam": "front", "steering_pot": 412})
+        raw_logger.log_raw({"summary": True, "frames": 1, "fps_measured": None})
+        raw_logger.close()
+        with open(raw_path, "r", encoding="utf-8") as f:
+            raw_lines = [json.loads(line) for line in f if line.strip()]
+        check("log_raw: 임의 dict가 스키마 변형 없이 한 줄씩 그대로 기록됨",
+              raw_lines[0] == {"frame": 0, "t": 5.0, "cam": "front", "steering_pot": 412})
+        check("log_raw: None 값도 JSON null로 살아남음(POT 미캘리브 상황)",
+              raw_lines[1]["fps_measured"] is None and raw_lines[1]["summary"] is True)
+        check("log()은 log_raw 위임 후에도 기존 5개 필드를 그대로 유지",
+              set(lines[0]) == {"t", "mission", "state", "tuning", "commands"})
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
