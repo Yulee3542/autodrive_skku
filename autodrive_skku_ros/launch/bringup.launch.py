@@ -45,9 +45,9 @@ run_odometry:=true(기본값)면 odometry_node가 함께 뜬다 — VO(시각 �
 run_arduino:=false로 실행하면 arduino_node 없이 기동한다 — 모터가 전혀 안
 움직이므로 mission_node가 계산해 /car/cmd/steer 등에 발행하는 값을
 "ros2 topic echo /car/cmd/steer"로 안전하게 관찰만 하고 싶을 때(검출 로직
-검증, 차는 손으로 옮기며 확인) 쓴다. teleop_node로 실제 주행하면서 동시에
+검증, 차는 손으로 옮기며 확인) 쓴다. remote_control_node로 실제 주행하면서 동시에
 mission의 계산값만 참고하고 싶으면 run_arduino:=true(기본값)로 두고
-mission_node/teleop_node를 같이 띄우면 되는데, 이 경우 실제 조향은 두
+mission_node/remote_control_node를 같이 띄우면 되는데, 이 경우 실제 조향은 두
 소스의 명령이 섞여 정확한 수동 조종은 안 된다는 점 주의(관찰 목적으로만).
 
 run_lidar:=false로 실행하면 rplidar/lidar_node 없이 기동한다 — 라이다

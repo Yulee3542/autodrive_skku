@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""수동 조작(teleop) 노드 — 키보드로 모터/조향을 직접 몰면서 그 주행을 학습용
+"""원격 조종(remote control) 노드 — 키보드로 모터/조향을 직접 몰면서 그 주행을 학습용
 데이터셋으로 남긴다.
 
 카메라 프레임은 mp4로, 프레임별 라벨은 같은 이름의 .jsonl 사이드카로 나간다:
@@ -9,7 +9,7 @@
 
 사이드카는 mp4에 실제로 기록된 프레임 한 장당 정확히 한 줄이고, "frame"이 mp4의
 0-based 프레임 인덱스다. 즉 학습 코드는 i번째 프레임과 i번째 줄을 그대로 짝지으면
-되고 인코딩 fps에 전혀 의존하지 않는다 — mp4는 config.TELEOP_RECORD_FPS라는 고정
+되고 인코딩 fps에 전혀 의존하지 않는다 — mp4는 config.REMOTE_CONTROL_RECORD_FPS라는 고정
 명목 레이트로 인코딩되지만 "t"는 camera_node가 찍어준 진짜 촬영 시각이다.
 세션 끝에는 {"summary": true, ...} 한 줄이 붙어 실측 fps를 남긴다(재생 속도를
 맞추고 싶으면 ffmpeg -r <fps_measured>로 remux).
@@ -25,7 +25,7 @@ steering_angle_deg는 arduino_node가 고정 캘리브레이션(steering_adc_lef
 camera_node.py와 같은 관례로 ROS/유닉스 전용 임포트는 전부 함수 안에서 한다 —
 그래야 ROS 없는 개발 PC(윈도우 포함)에서도 셀프테스트가 돈다.
 
-오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.teleop_node --selftest
+오프라인 셀프테스트 (ROS 불필요): python3 -m autodrive_skku_ros.nodes.remote_control_node --selftest
 """
 import datetime
 import os
@@ -45,7 +45,7 @@ SPEED_STEP = 20
 SPEED_LIMIT = 255
 
 HELP = """
-수동 조작 모드 (모터/조향 동작 확인용) — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
+원격 조종 모드 (모터/조향 동작 확인용) — 키를 누르면 즉시 반영됩니다 (Enter 불필요).
   ※ w/x로 속도를 줘도 먼저 g(주행 허용)를 안 보내면 차가 안 움직입니다
     (펌웨어 워치독 게이트 — s를 누르면 다시 닫히므로 그 다음엔 g부터).
   g : go (주행 허용, 반드시 먼저)
@@ -62,7 +62,7 @@ HELP = """
 이 모드 동안 /camera/front, /camera/back을 mp4로 녹화하고, 프레임마다 그 시점의
 조향/속도/게이트 + 조향 POT을 같은 이름의 .jsonl로 남깁니다 (학습용 데이터셋).
 camera_node가 같이 떠 있어야 합니다 — bringup.launch.py run_mission:=false 등으로
-먼저 기동해둘 것. 저장 위치는 config.TELEOP_RECORD_DIR.
+먼저 기동해둘 것. 저장 위치는 config.REMOTE_CONTROL_RECORD_DIR.
 """
 
 
@@ -89,7 +89,7 @@ class _CameraRecorder:
     """CompressedImage(jpeg) 구독 콜백에서 받은 프레임을 mp4 + 라벨 jsonl로 기록.
 
     첫 프레임이 와야 해상도를 알 수 있으므로 VideoWriter(와 사이드카 로거)는 그때
-    연다. mp4 자체는 config.TELEOP_RECORD_FPS 고정 레이트 인코딩이지만, 프레임과
+    연다. mp4 자체는 config.REMOTE_CONTROL_RECORD_FPS 고정 레이트 인코딩이지만, 프레임과
     라벨의 대응은 인덱스로 잡으므로 그 명목 fps가 틀려도 데이터셋은 정확하다.
 
     ROS 비의존 — msg는 .data와 .header.stamp만 읽는 덕타이핑이라 셀프테스트에서
@@ -132,10 +132,10 @@ class _CameraRecorder:
             if self._writer is None:
                 h, w = frame.shape[:2]
                 self._writer = self._writer_factory(
-                    self._path, config.TELEOP_RECORD_FPS, w, h)
+                    self._path, config.REMOTE_CONTROL_RECORD_FPS, w, h)
                 if self._log_path is not None:
                     self._logger = drive_logger.DriveLogger(self._log_path)
-                print(f"[teleop] {self._name} 녹화 시작 -> {self._path}")
+                print(f"[remote_control] {self._name} 녹화 시작 -> {self._path}")
             self._writer.write(frame)
             if self._logger is not None:
                 record = {"frame": self._frames, "t": t, "cam": self._name}
@@ -155,7 +155,7 @@ class _CameraRecorder:
             if self._writer is None:
                 # 구독은 걸렸는데 프레임이 0장 — 예전엔 조용히 아무 파일도 안 남아
                 # 나중에야 알아챘다. camera_node 미기동이 거의 항상 원인.
-                print(f"[teleop] {self._name} 프레임을 한 장도 받지 못했습니다 "
+                print(f"[remote_control] {self._name} 프레임을 한 장도 받지 못했습니다 "
                       f"— camera_node가 떠 있는지 확인하세요 (녹화 파일 없음)")
                 return
             self._writer.release()
@@ -167,16 +167,16 @@ class _CameraRecorder:
                     "cam": self._name,
                     "frames": self._frames,
                     "fps_measured": fps,
-                    "fps_encoded": config.TELEOP_RECORD_FPS,
+                    "fps_encoded": config.REMOTE_CONTROL_RECORD_FPS,
                     "t_first": self._first_t,
                     "t_last": self._last_t,
                 })
                 self._logger.close()
                 self._logger = None
             shown = "측정불가" if fps is None else f"{fps:.1f}"
-            print(f"[teleop] {self._name} 녹화 종료 -> {self._path} "
+            print(f"[remote_control] {self._name} 녹화 종료 -> {self._path} "
                   f"({self._frames}프레임, 실측 {shown}fps / 인코딩 "
-                  f"{config.TELEOP_RECORD_FPS:.1f}fps)")
+                  f"{config.REMOTE_CONTROL_RECORD_FPS:.1f}fps)")
 
 
 def read_key():
@@ -217,7 +217,7 @@ def main(args=None):
     from sensor_msgs.msg import CompressedImage
     from std_msgs.msg import Empty, Float32, Int16, Int32, String
 
-    class TeleopNode(Node):
+    class RemoteControlNode(Node):
         """run_mission:=false로 띄운 상태에서 모터/조향을 수동으로 몰면서 그 주행을
         데이터셋으로 남기는 키보드 조작 도구(기존 tools/hw_test.py의 ROS 버전).
         모터 명령 발행은 run()의 블로킹 키 입력 루프가 담당하고, /camera/* 구독과
@@ -227,7 +227,7 @@ def main(args=None):
         연결하지 않는다(ros2/launch#735)."""
 
         def __init__(self):
-            super().__init__("teleop_node")
+            super().__init__("remote_control_node")
             self._go_pub = self.create_publisher(Empty, "/car/cmd/go", 10)
             self._stop_pub = self.create_publisher(Empty, "/car/cmd/stop", 10)
             self._drive_pub = self.create_publisher(Int16, "/car/cmd/drive", 10)
@@ -248,9 +248,9 @@ def main(args=None):
 
             self._recorders = []
             if cv2 is None:
-                print("[teleop] opencv 미설치 — 카메라 녹화 생략(수동 조작은 그대로 동작)")
+                print("[remote_control] opencv 미설치 — 카메라 녹화 생략(수동 조작은 그대로 동작)")
             else:
-                paths = make_session_paths(config.TELEOP_RECORD_DIR)
+                paths = make_session_paths(config.REMOTE_CONTROL_RECORD_DIR)
                 for name, topic in (("front", "/camera/front"), ("back", "/camera/back")):
                     mp4_path, log_path = paths[name]
                     rec = _CameraRecorder(name, mp4_path, label_fn=self._labels,
@@ -326,7 +326,7 @@ def main(args=None):
                 # 종료 경로(q, Ctrl+C, SIGTERM)와 무관하게 모터에 정지 신호를 남긴다 —
                 # 안 그러면 마지막으로 준 속도로 차가 계속 움직인 채 프로그램만 끝난다.
                 self._stop_pub.publish(Empty())
-                print("[teleop] 종료 — 정지 명령 발행")
+                print("[remote_control] 종료 — 정지 명령 발행")
                 for rec in self._recorders:
                     rec.close()
 
@@ -336,7 +336,7 @@ def main(args=None):
     signal.signal(signal.SIGTERM, _on_sigterm)
 
     rclpy.init(args=args)
-    node = TeleopNode()
+    node = RemoteControlNode()
     # run()은 read_key()로 stdin을 블로킹 읽으므로, 카메라 구독 콜백(녹화)이
     # 동작하려면 별도 스레드에서 spin해야 한다 — 메인 스레드는 키 입력에 전념.
     executor = SingleThreadedExecutor()
@@ -392,7 +392,7 @@ def selftest():
     """실제 카메라/ROS/mp4 인코더 없이 _CameraRecorder의 프레임↔라벨 정합,
     타임스탬프 출처, close() 이후 재오픈 방지를 검증한다."""
     if cv2 is None:
-        print("[X ] opencv 미설치 — teleop 셀프테스트 불가")
+        print("[X ] opencv 미설치 — remote_control 셀프테스트 불가")
         return 1
     import json
     import shutil
@@ -404,7 +404,7 @@ def selftest():
         checks.append((name, ok))
         print(f"[{'OK' if ok else 'X '}] {name}")
 
-    tmp_dir = tempfile.mkdtemp(prefix="teleop_selftest_")
+    tmp_dir = tempfile.mkdtemp(prefix="remote_control_selftest_")
     try:
         # ---- make_session_paths: mp4와 사이드카가 같은 stamp를 공유 ----
         rec_dir = os.path.join(tmp_dir, "recordings")
@@ -469,7 +469,7 @@ def selftest():
         check("종료 요약 줄에 프레임 수와 실측 fps가 남음",
               len(summary) == 1 and summary[0]["frames"] == 3
               and abs(summary[0]["fps_measured"] - 2.0) < 1e-9
-              and summary[0]["fps_encoded"] == config.TELEOP_RECORD_FPS)
+              and summary[0]["fps_encoded"] == config.REMOTE_CONTROL_RECORD_FPS)
 
         # ---- 회귀: close() 이후 늦게 도착한 프레임이 녹화를 덮어쓰지 않아야 함 ----
         # (executor는 daemon 스레드라 node.run()의 finally가 close()를 부른 뒤에도
