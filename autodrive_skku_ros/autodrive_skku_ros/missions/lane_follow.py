@@ -1,9 +1,13 @@
+import json
 import math
+import os
 import time
 
 from .. import filters
 from .. import config as _config
 from .. import vision as _vision
+from .. import motion_model as _motion_model
+from ..calibration.ground_projection import GroundProjection
 
 try:
     from ..vendor import Function_Library as fl
@@ -169,6 +173,13 @@ LANE_POI = dict(
     # float 전용)과 섞이면 안 되므로(model_path와 동일 이유) 실제 좌표값을 기본값으로
     # 둔다 — bev_w/bev_h를 튜닝으로 바꾸면 이 값도 같이 갱신할 것.
     car_center_px=(160.0, 239.0),
+    # ---- BEV->차량미터 진짜 호모그래피 (선배(taegyu) 프로젝트 ground_projection.py
+    # 이식, 2026-08-03. tools/calibrate_bev_ground.py로 생성). 위 px_per_m 스칼라는
+    # BEV 워프의 세로/가로 배율이 6.4배 어긋나 있다는 걸 알면서 쓰는 근사치다
+    # (이 파일 상단 ⚠️ 참고) — 이 경로에 유효한 캘리브레이션 파일이 있으면
+    # _pure_pursuit_delta_deg가 그 호모그래피로 변환하고, 없으면(기본, 파일 없음)
+    # 기존 px_per_m 스칼라 방식 그대로 — 회귀 없음.
+    ground_projection_path="calibration/ground_projection_front.json",
     # ---- lookahead 거리. ⚠️ 이 값이 축거(WHEELBASE_M=0.545)보다 짧으면
     # delta=atan(2L·sinα/ld)의 이득 2L/ld가 1을 크게 넘어 조향각이 즉시 포화된다
     # (2026-07-23 실측: ld=0.35일 때 2L/ld=3.1 → BEV 폭의 6%(20px)만 치우쳐도
@@ -476,10 +487,41 @@ def analyze_lane_poi(frame, config=LANE_POI, corridor=None):
 
 def _to_vehicle_frame(x_px, y_px, car_center_px, px_per_m):
     """BEV 픽셀좌표 (아래로 갈수록 y 증가) → 차량 기준 (x=전방, y=좌측) [m].
-    팀 저장소 lane_pure_pursuit_node.py의 _to_vehicle_frame과 동일 공식."""
+    팀 저장소 lane_pure_pursuit_node.py의 _to_vehicle_frame과 동일 공식.
+
+    px_per_m 단일 스칼라 근사 — LANE_POI 상단 ⚠️ 참고(BEV 워프의 세로/가로
+    배율이 6.4배 어긋나 있음). ground_projection_path에 유효한 캘리브레이션이
+    있으면 _pure_pursuit_delta_deg가 이 대신 진짜 호모그래피를 쓴다."""
     dx_px = car_center_px[1] - y_px
     dy_px = car_center_px[0] - x_px
     return dx_px / px_per_m, dy_px / px_per_m
+
+
+_GROUND_PROJECTION_UNLOADED = object()  # LaneCenterTracker 캘리브레이션 지연로딩 센티널
+
+
+def _load_ground_projection(path):
+    """ground_projection_path의 캘리브레이션 파일을 로드. 없거나/깨졌으면
+    None(px_per_m 스칼라 폴백) — 캘리브레이션은 선택 사항이라 파일이 없는 게
+    기본이자 정상 상태다. repo 루트 기준 상대경로를 허용한다."""
+    if not path:
+        return None
+    if not os.path.isabs(path):
+        # missions/lane_follow.py -> autodrive_skku_ros -> autodrive_skku_ros(pkg 루트)
+        # -> repo 루트(autodrive_skku_ros/, calibration/, tools/가 형제).
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__)))))
+        path = os.path.join(repo_root, path)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return GroundProjection.from_dict(payload)
+    except (OSError, ValueError, KeyError) as e:
+        print(f"[lane_follow] 지면 캘리브레이션 로드 실패({path}): {e} — "
+              f"px_per_m 스칼라 방식으로 폴백")
+        return None
 
 
 def _pick_lookahead(pts_vf, ld):
@@ -495,21 +537,14 @@ def _pick_lookahead(pts_vf, ld):
     return cand[-1]
 
 
-def _pure_pursuit_delta_deg(path_points, config, speed_proxy, debug=None):
-    """path_points(BEV 픽셀, 가까운→먼) → pure-pursuit 조향각(도, 좌+/우-는
-    car.steer_pulse 방향 부호와 아래 follow_lane_poi에서 맞춘다). 목표점을
-    못 고르면 None.
-
-    debug: dict를 넘기면 car_center_px/ld_m/lookahead_px/alpha_deg를 채운다
-    (debug_viz.draw_lane_poi의 lookahead 마커/lookahead 원 오버레이용)."""
-    car_center_px = config["car_center_px"]
-    px_per_m = config["px_per_m"]
-    pts_vf = [_to_vehicle_frame(x, y, car_center_px, px_per_m) for (y, x) in path_points]
-
+def _delta_from_vehicle_points(pts_vf, config, speed_proxy, debug=None):
+    """차량 기준(m) 목표점 목록 → pure-pursuit 조향각(도). path_points든
+    지연보상된 예측 경로든, 일단 차량좌표계 점 리스트로 변환되고 나면 이후
+    lookahead 선택/자전거모델 수식은 동일하다 — 그 공통 부분."""
     ld = min(config["ld_max_m"], max(config["ld_min_m"],
                                      config["ld_gain"] * (speed_proxy / 100.0)))
     if debug is not None:
-        debug.update(car_center_px=car_center_px, ld_m=ld)
+        debug.update(car_center_px=config["car_center_px"], ld_m=ld)
     goal = _pick_lookahead(pts_vf, ld)
     if goal is None:
         return None
@@ -523,8 +558,11 @@ def _pure_pursuit_delta_deg(path_points, config, speed_proxy, debug=None):
     limit = _config.STEERING_LIMIT_DEG
     delta_deg = max(-limit, min(limit, delta_deg_raw))
     if debug is not None:
-        # 픽셀좌표로 역변환(_to_vehicle_frame의 역) — 오버레이가 BEV 위에 lookahead
-        # 지점을 표시할 수 있게.
+        car_center_px = config["car_center_px"]
+        px_per_m = config["px_per_m"]
+        # 픽셀좌표로 역변환(_to_vehicle_frame의 역, 오버레이 전용 근사) — 호모그래피
+        # 사용 중이어도 디버그 마커는 px_per_m 스칼라로 대략 그린다(정확한 위치가
+        # 아니라 "대충 어느 방향/거리"만 보여주면 충분).
         lookahead_px = (car_center_px[0] - gy * px_per_m, car_center_px[1] - gx * px_per_m)
         # saturated: 클램프가 실제로 걸렸는지 — 계속 True로 보이면 사실상 bang-bang과
         # 같아지고(비례 제어 이점 소멸) 속도도 항상 바닥이 되므로, 실차 튜닝 때
@@ -535,21 +573,64 @@ def _pure_pursuit_delta_deg(path_points, config, speed_proxy, debug=None):
     return delta_deg
 
 
+def _pure_pursuit_delta_deg(path_points, config, speed_proxy, ground_projection=None, debug=None):
+    """path_points(BEV 픽셀, 가까운→먼) → pure-pursuit 조향각(도, 좌+/우-는
+    car.steer_pulse 방향 부호와 아래 follow_lane_poi에서 맞춘다). 목표점을
+    못 고르면 None.
+
+    ground_projection: 캘리브레이션된 GroundProjection이 있으면 그 진짜
+    호모그래피로 변환(캘리브레이션 범위 밖 점은 그냥 버림 — 조용히 부정확한
+    px_per_m으로 되돌아가지 않고, 남은 유효 점이 0개면 이 함수가 None을
+    반환해 "이번 틱 목표 없음"으로 정직하게 처리된다). None이면(기본, 캘리브레이션
+    파일 없음) 기존 px_per_m 스칼라 방식.
+
+    debug: dict를 넘기면 car_center_px/ld_m/lookahead_px/alpha_deg를 채운다
+    (debug_viz.draw_lane_poi의 lookahead 마커/lookahead 원 오버레이용)."""
+    if ground_projection is not None:
+        pts_vf = []
+        for (y, x) in path_points:
+            ground, valid = ground_projection.image_to_ground([(x, y)])
+            if valid[0]:
+                pts_vf.append((float(ground[0, 0]), float(ground[0, 1])))
+    else:
+        car_center_px = config["car_center_px"]
+        px_per_m = config["px_per_m"]
+        pts_vf = [_to_vehicle_frame(x, y, car_center_px, px_per_m) for (y, x) in path_points]
+    return _delta_from_vehicle_points(pts_vf, config, speed_proxy, debug=debug)
+
+
 class LaneCenterTracker:
     """follow_lane_poi()의 프레임 간 상태(칼만필터로 스무딩된 조향각 + 코리도어
     락 + 조향 펄스 게이팅 시각)를 들고 있는 객체 -- 미션 on_start()에서 하나
     만들어 매 틱 재사용한다. .smoothed는 기존 호출부(debug_viz.py) 호환을 위해
-    유지하는 읽기전용 별칭이다(이제 픽셀이 아니라 조향각[도] 단위)."""
+    유지하는 읽기전용 별칭이다(이제 픽셀이 아니라 조향각[도] 단위).
+
+    ground_projection/latency는 2026-08-03 추가(선배(taegyu) 프로젝트 이식) —
+    둘 다 생성자 시그니처를 바꾸지 않고 지연 로딩/구성해 기존 `LaneCenterTracker()`
+    호출부(road.py, 각종 테스트)를 건드리지 않는다."""
 
     def __init__(self):
         self.kf = filters.ScalarKalmanFilter()
         self.corridor = None       # 코리도어 락 상태 (dict) — 첫 프레임엔 None(제한 없음)
         self._last_pulse_t = 0.0   # 마지막 steer_pulse 발행 시각 (게이팅용)
+        # follow_lane_poi 첫 호출 때 config["ground_projection_path"]로 지연 로딩
+        # (생성자에는 config가 없으므로). None=캘리브레이션 없음으로 확정.
+        self.ground_projection = _GROUND_PROJECTION_UNLOADED
+        # 지연보상(motion_model.LatencyCompensator) — ground_projection과
+        # config.ODOMETRY["pwm_to_mps"]가 둘 다 있을 때만 실제로 쓰인다
+        # (follow_lane_poi 참고). 생성 자체는 항상 해 둔다(가볍고, 상태 없음).
+        self.latency = _motion_model.LatencyCompensator()
+        self._last_speed_mps = 0.0     # 직전 틱에 실제로 명령한 속도(지연보상 적분용)
+        self._last_steering_rad = 0.0  # 직전 틱에 실제로 명령한 조향(지연보상 적분용)
 
     def reset(self):
         self.kf = filters.ScalarKalmanFilter()
         self.corridor = None
         self._last_pulse_t = 0.0
+        self.ground_projection = _GROUND_PROJECTION_UNLOADED
+        self.latency.reset()
+        self._last_speed_mps = 0.0
+        self._last_steering_rad = 0.0
 
     @property
     def smoothed(self):
@@ -585,10 +666,23 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI, now=None):
     반환: analyze_lane_poi details에 delta_deg/smoothed/direction/lookahead를
     더한 dict — 디버그 오버레이용. 분석 자체가 불가하면 None. 기존 호출부는
     반환값을 무시해도 동작이 같다.
+
+    지연보상(latency compensation, 선배(taegyu) 프로젝트 motion_model.py 이식,
+    2026-08-03): config["ground_projection_path"]에 유효한 캘리브레이션이
+    있고 config.ODOMETRY["pwm_to_mps"]도 실측돼 있으면, 이번 틱 관측 경로를
+    직전 명령(속도/조향)으로 "지금"까지 적분해 그 예측 경로로 조향각을 계산한다
+    (캡처~판단 사이 처리지연 동안 차가 움직인 만큼 목표점이 밀려 보이는 걸
+    보정). 둘 중 하나라도 없으면(기본) 예전처럼 이번 틱 관측을 그대로 쓴다 —
+    회귀 없음. ODOMETRY.pwm_to_mps가 미측정인 동안 항상 비활성인 건
+    odometry_node.py의 동일 fail-inert 관례와 같다.
     """
     clock = now or time.monotonic
     t = clock()
     try:
+        if tracker.ground_projection is _GROUND_PROJECTION_UNLOADED:
+            tracker.ground_projection = _load_ground_projection(
+                config.get("ground_projection_path"))
+
         details = analyze_lane_poi(frame, config, corridor=tracker.corridor)
         if details is None:
             return None
@@ -596,8 +690,33 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI, now=None):
 
         pp_dbg = {}
         speed_proxy = float(_config.DRIVE_SPEED)
-        raw_delta_deg = _pure_pursuit_delta_deg(details["path_points"], config, speed_proxy,
-                                                debug=pp_dbg)
+        pwm_to_mps = _config.ODOMETRY.get("pwm_to_mps")
+        latency_active = tracker.ground_projection is not None and bool(pwm_to_mps)
+
+        raw_delta_deg = None
+        if latency_active:
+            vf_points = []
+            for (y, x) in details["path_points"]:
+                ground, valid = tracker.ground_projection.image_to_ground([(x, y)])
+                if valid[0]:
+                    vf_points.append((float(ground[0, 0]), float(ground[0, 1])))
+            if len(vf_points) >= 2:
+                tracker.latency.observe(vf_points, stamp_s=t)
+            predicted = tracker.latency.predict(
+                now_s=t, speed_mps=tracker._last_speed_mps,
+                steering_rad=tracker._last_steering_rad)
+            pp_dbg["latency"] = predicted.to_dict()
+            if predicted.valid:
+                raw_delta_deg = _delta_from_vehicle_points(
+                    list(predicted.points), config, speed_proxy, debug=pp_dbg)
+
+        if raw_delta_deg is None:
+            # 지연보상 비활성이거나, 활성인데도 이번엔 예측이 무효(경로 소실/
+            # 지평선 초과 등) -> 이번 틱 관측을 직접 쓴다(기존 동작과 동일).
+            raw_delta_deg = _pure_pursuit_delta_deg(
+                details["path_points"], config, speed_proxy,
+                tracker.ground_projection, debug=pp_dbg)
+
         smoothed = tracker.update(raw_delta_deg,
                                   config["kf_process_noise"], config["kf_measurement_noise"])
         variance = tracker.kf.variance()
@@ -607,6 +726,8 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI, now=None):
         max_var = config["kf_max_variance_deg"]
         if smoothed is None or (max_var is not None and variance > max_var):
             return details  # 추정 불가/미검출 또는 너무 불확실 -> 이전 상태 유지
+
+        tracker._last_steering_rad = math.radians(smoothed)  # 다음 틱 지연보상 적분용
 
         deadzone = config["center_deadzone_deg"]
         if abs(smoothed) <= deadzone:
@@ -627,6 +748,9 @@ def follow_lane_poi(tracker, car, frame, config=LANE_POI, now=None):
             frac = min(1.0, abs(smoothed) / config["curve_steer_deg_for_min"])
             speed = int(round(_config.DRIVE_SPEED * (1 - frac) + _config.SLOW_SPEED * frac))
             car.drive(speed)
+            tracker._last_speed_mps = speed * pwm_to_mps if pwm_to_mps else 0.0
+        elif pwm_to_mps:
+            tracker._last_speed_mps = _config.DRIVE_SPEED * pwm_to_mps
 
         details.update(direction=direction)
         return details

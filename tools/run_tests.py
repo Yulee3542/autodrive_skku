@@ -65,6 +65,20 @@ def _run_drive_log():
     return m.selftest() == 0
 
 
+def _run_motion_model():
+    # 지연보상(자전거모델 적분 + 예측구간 상한) 순수 함수 — 선배(taegyu)
+    # 프로젝트 이식, lane_follow.py의 Pure-Pursuit이 사용 (_run_lidar와 동일 패턴).
+    m = _load("autodrive_skku_ros.motion_model")
+    return m.selftest() == 0
+
+
+def _run_ground_projection():
+    # 카메라(BEV)-지면 호모그래피 캘리브레이션 순수 함수 — 선배(taegyu) 프로젝트
+    # 이식, tools/calibrate_bev_ground.py가 생성하고 lane_follow.py가 소비.
+    m = _load("autodrive_skku_ros.calibration.ground_projection")
+    return m.selftest() == 0
+
+
 def _run_lidar():
     # 순수 지오메트리 함수 테스트는 nodes/lidar_node.py 로컬 셀프테스트로 이관됨
     m = _load("autodrive_skku_ros.nodes.lidar_node")
@@ -159,6 +173,8 @@ MODULES = {
     "env": ("환경/하드웨어 점검 (패키지·카메라·시리얼)", _run_env),
     "filters": ("범용 스칼라 칼만필터 유틸 순수 함수", _run_filters),
     "drive_log": ("주행 설정값+명령 타임스탬프 로그 (디지털 트윈 재현용)", _run_drive_log),
+    "motion_model": ("지연보상 자전거모델 적분 (선배 프로젝트 이식)", _run_motion_model),
+    "ground_projection": ("BEV-지면 호모그래피 캘리브레이션 (선배 프로젝트 이식)", _run_ground_projection),
     "lidar": ("라이다 후방 장착 지오메트리 + ROS LaserScan 변환 순수 함수", _run_lidar),
     "arduino": ("아두이노 시리얼 프로토콜/워치독/조향 POT 캘리브레이션 순수 함수", _run_arduino),
     "camera_node": ("카메라 캡처/상하분할/회전 보정 순수 함수 (미션 'camera'와 다름)", _run_camera_node),
