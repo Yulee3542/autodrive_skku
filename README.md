@@ -1,6 +1,14 @@
 # autodrive_skku
 
-국민 AI 자율주행 경진대회 차량 코드. 아두이노 메가(구동 모터 + 스티어링 모터) + 전방 C920 카메라(상/하 분할) + RPLidar(+선택 후방 카메라) 구성이며, **ROS 2** launch 한 번으로 모든 센서 노드가 뜨고 미션을 선택해 주행한다.
+> **English overview.** ROS 2 software for HAN Lab's (Yonsei University Mirae Campus) 1/5-scale vehicle at the
+> **4th National Collegiate AI Autonomous Driving Competition** (hosted by Sungkyunkwan University, Aug 2026).
+> The car uses an Arduino Mega (drive and steering motors), a front Logitech C920 camera and an RPLidar.
+> A single `bringup.launch.py` starts every sensor node and the selected mission (`road`: lane following with
+> obstacle lane change, `traffic`: traffic-light stop/go, `t_parking`: LiDAR-based T-parking).
+> The repository also contains the Arduino firmware (`arduino/car_controller`), environment and hardware check
+> scripts, and a debugging guide. The detailed manual below is written in Korean.
+
+제4회 전국 대학생 AI 자율주행 경진대회(성균관대 주최, 2026-08) 차량 코드. 아두이노 메가(구동 모터 + 스티어링 모터) + 전방 C920 카메라(상/하 분할) + RPLidar(+선택 후방 카메라) 구성이며, **ROS 2** launch 한 번으로 모든 센서 노드가 뜨고 미션을 선택해 주행한다.
 
 주 실행 환경은 **Ubuntu + ROS 2**(대회 권장 22.04+Humble, 24.04+Jazzy 등도 동작). 개발용으로 **WSL2**도 지원. 이 저장소는 ROS 2 패키지 하나(`autodrive_skku_ros`)이고, 차량 제어는 커스텀 메시지 없이 표준 `std_msgs`만 쓴다.
 
